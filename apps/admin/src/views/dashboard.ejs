@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard — sats.fast</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #c9d1d9; min-height: 100vh; }
+    nav { background: #161b22; border-bottom: 1px solid #30363d; padding: 1rem 2rem; display: flex; align-items: center; gap: 2rem; }
+    nav .brand { font-size: 1.25rem; font-weight: 700; color: #f0b90b; text-decoration: none; }
+    nav a { color: #8b949e; text-decoration: none; font-size: 0.9rem; }
+    nav a:hover { color: #c9d1d9; }
+    .container { max-width: 1200px; margin: 2rem auto; padding: 0 2rem; }
+    h1 { color: #f0f6fc; margin-bottom: 1.5rem; }
+    .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.5rem; margin-bottom: 1rem; }
+    .card h2 { color: #f0f6fc; font-size: 1.1rem; margin-bottom: 0.5rem; }
+    .card .value { font-size: 2rem; font-weight: 700; color: #f0b90b; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 0.75rem 1rem; text-align: left; border-bottom: 1px solid #30363d; }
+    th { color: #8b949e; font-size: 0.85rem; text-transform: uppercase; }
+    td { font-size: 0.9rem; }
+    .footer { text-align: center; color: #484f58; font-size: 0.8rem; padding: 2rem; margin-top: 2rem; border-top: 1px solid #30363d; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="/" class="brand">⚡ sats.fast</a>
+    <a href="/">Dashboard</a>
+    <a href="/users">Users</a>
+    <a href="/approvals">Approvals</a>
+    <a href="/receipts">Receipts</a>
+    <a href="/config">Config</a>
+    <a href="/health">Health</a>
+    <a href="/logout" style="margin-left:auto;">Logout</a>
+  </nav>
+  <div class="container">
+    <h1>📊 Dashboard</h1>
+    <div class="grid">
+      <div class="card">
+        <h2>Users</h2>
+        <div class="value"><%= userCount %></div>
+      </div>
+      <div class="card">
+        <h2>Receipts</h2>
+        <div class="value"><%= receiptCount %></div>
+      </div>
+      <div class="card">
+        <h2>Pending Approvals</h2>
+        <div class="value"><%= pendingCount %></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Recent Transactions</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>User</th>
+            <th>Action</th>
+            <th>Amount (sats)</th>
+            <th>Fee (sats)</th>
+            <th>Time</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% recentReceipts.forEach(function(r) { %>
+          <tr>
+            <td><%= r.id %></td>
+            <td><%= r.userId %></td>
+            <td><%= r.actionType %></td>
+            <td><%= r.amountSats || '-' %></td>
+            <td><%= r.feeSats || '-' %></td>
+            <td><%= r.createdAt %></td>
+          </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="footer">sats.fast admin — Demo-grade security. Add proper auth before production use.</div>
+</body>
+</html>

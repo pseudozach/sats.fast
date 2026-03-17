@@ -1,0 +1,13 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/shared" },
+    { "path": "packages/wallet-spark" },
+    { "path": "packages/wallet-liquid" },
+    { "path": "packages/policy" },
+    { "path": "packages/receipts" },
+    { "path": "packages/agent" },
+    { "path": "apps/bot" },
+    { "path": "apps/admin" }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "name": "@sats-fast/agent",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsup src/index.ts src/tools.ts src/prompt.ts --format cjs --target esnext --outDir dist --clean && cp src/index.d.ts dist/index.d.ts",
+    "dev": "tsup src/index.ts src/tools.ts src/prompt.ts --format cjs --target esnext --outDir dist --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "langchain": "^0.3.0",
+    "@langchain/core": "^0.3.0",
+    "@langchain/openai": "^0.4.0",
+    "@langchain/anthropic": "^0.3.0",
+    "@langchain/langgraph": "^0.2.0",
+    "zod": "^3.23.0",
+    "@sats-fast/shared": "workspace:*",
+    "@sats-fast/wallet-spark": "workspace:*",
+    "@sats-fast/wallet-liquid": "workspace:*",
+    "@sats-fast/policy": "workspace:*",
+    "@sats-fast/receipts": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "tsup": "^8.0.0"
+  }
+}

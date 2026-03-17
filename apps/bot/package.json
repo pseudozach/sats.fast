@@ -1,0 +1,28 @@
+{
+  "name": "@sats-fast/bot",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "grammy": "^1.30.0",
+    "dotenv": "^16.4.0",
+    "bip39": "^3.1.0",
+    "drizzle-orm": "^0.38.0",
+    "@sats-fast/shared": "workspace:*",
+    "@sats-fast/wallet-spark": "workspace:*",
+    "@sats-fast/wallet-liquid": "workspace:*",
+    "@sats-fast/policy": "workspace:*",
+    "@sats-fast/receipts": "workspace:*",
+    "@sats-fast/agent": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

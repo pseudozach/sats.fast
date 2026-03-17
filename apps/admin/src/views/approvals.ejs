@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Approvals — sats.fast</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #c9d1d9; min-height: 100vh; }
+    nav { background: #161b22; border-bottom: 1px solid #30363d; padding: 1rem 2rem; display: flex; align-items: center; gap: 2rem; }
+    nav .brand { font-size: 1.25rem; font-weight: 700; color: #f0b90b; text-decoration: none; }
+    nav a { color: #8b949e; text-decoration: none; font-size: 0.9rem; }
+    nav a:hover { color: #c9d1d9; }
+    .container { max-width: 1200px; margin: 2rem auto; padding: 0 2rem; }
+    h1 { color: #f0f6fc; margin-bottom: 1.5rem; }
+    .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.5rem; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 0.75rem 1rem; text-align: left; border-bottom: 1px solid #30363d; }
+    th { color: #8b949e; font-size: 0.85rem; text-transform: uppercase; }
+    td { font-size: 0.9rem; }
+    .btn { display: inline-block; padding: 0.3rem 0.75rem; border-radius: 6px; border: none; cursor: pointer; font-size: 0.8rem; text-decoration: none; color: white; }
+    .btn-primary { background: #238636; }
+    .btn-danger { background: #da3633; }
+    .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 10px; font-size: 0.75rem; font-weight: 600; }
+    .badge-pending { background: #9e6a03; color: #f0b90b; }
+    .badge-approved { background: #238636; color: #56d364; }
+    .badge-denied { background: #da3633; color: #f85149; }
+    .footer { text-align: center; color: #484f58; font-size: 0.8rem; padding: 2rem; margin-top: 2rem; border-top: 1px solid #30363d; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="/" class="brand">⚡ sats.fast</a>
+    <a href="/">Dashboard</a>
+    <a href="/users">Users</a>
+    <a href="/approvals">Approvals</a>
+    <a href="/receipts">Receipts</a>
+    <a href="/config">Config</a>
+    <a href="/logout" style="margin-left:auto;">Logout</a>
+  </nav>
+  <div class="container">
+    <h1>🔐 Pending Approvals</h1>
+    <div class="card">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>User</th>
+            <th>Action</th>
+            <th>Status</th>
+            <th>Created</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% approvals.forEach(function(a) { %>
+          <tr>
+            <td><%= a.id %></td>
+            <td><%= a.userId %></td>
+            <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><%= a.actionJson %></td>
+            <td>
+              <span class="badge badge-<%= a.status %>"><%= a.status %></span>
+            </td>
+            <td><%= a.createdAt %></td>
+            <td>
+              <% if (a.status === 'pending') { %>
+                <form method="POST" action="/approvals/<%= a.id %>" style="display:inline;">
+                  <input type="hidden" name="action" value="approve">
+                  <button type="submit" class="btn btn-primary">Approve</button>
+                </form>
+                <form method="POST" action="/approvals/<%= a.id %>" style="display:inline;">
+                  <input type="hidden" name="action" value="deny">
+                  <button type="submit" class="btn btn-danger">Deny</button>
+                </form>
+              <% } else { %>
+                —
+              <% } %>
+            </td>
+          </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="footer">sats.fast admin — Demo-grade security. Add proper auth before production use.</div>
+</body>
+</html>
