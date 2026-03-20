@@ -74,87 +74,68 @@ echo ""
 echo "📦 [1/5] Installing system packages..."
 case "$PKG_MANAGER" in
   apt)
-    echo "   Running apt-get update..."
-    sudo apt-get update -qq
-    echo "   Installing git, curl, sqlite3, nginx, build-essential, openssl..."
-    sudo apt-get install -y git curl sqlite3 nginx build-essential openssl
+    sudo apt-get update -qq 2>&1 | tail -1
+    sudo apt-get install -y -qq git curl sqlite3 nginx build-essential openssl > /dev/null
     ;;
   dnf)
-    echo "   Installing git, curl, sqlite, nginx, gcc, make, openssl..."
-    sudo dnf install -y git curl sqlite nginx gcc gcc-c++ make openssl
+    # Amazon Linux ships curl-minimal which conflicts with curl — skip it
+    sudo dnf install -q -y git sqlite nginx gcc gcc-c++ make openssl 2>&1 | grep -v "already installed" || true
     ;;
   yum)
-    echo "   Installing git, curl, sqlite, nginx, gcc, make, openssl..."
-    sudo yum install -y git curl sqlite nginx gcc gcc-c++ make openssl
+    sudo yum install -q -y git sqlite nginx gcc gcc-c++ make openssl 2>&1 | grep -v "already installed" || true
     ;;
 esac
 echo "   ✅ System packages installed"
 
 # ── 2. Node.js 22 ────────────────────────────────────
-echo ""
 echo "📦 [2/5] Checking Node.js..."
 if ! command -v node &>/dev/null || [[ $(node -v | cut -d. -f1 | tr -d 'v') -lt 22 ]]; then
-  echo "   Node.js 22 not found, installing from NodeSource..."
+  echo "   Installing Node.js 22..."
   case "$PKG_MANAGER" in
     apt)
-      echo "   Adding NodeSource apt repository..."
-      curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-      echo "   Installing nodejs..."
-      sudo apt-get install -y nodejs
+      curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - > /dev/null 2>&1
+      sudo apt-get install -y -qq nodejs > /dev/null
       ;;
     dnf|yum)
-      echo "   Adding NodeSource rpm repository..."
-      curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo -E bash -
-      echo "   Installing nodejs..."
-      sudo $PKG_MANAGER install -y nodejs
+      curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo -E bash - > /dev/null 2>&1
+      sudo $PKG_MANAGER install -q -y nodejs > /dev/null 2>&1
       ;;
   esac
-else
-  echo "   Node.js $(node -v) already installed ✅"
 fi
 echo "   ✅ Node.js $(node -v)"
 
 # ── 3. pnpm + pm2 ─────────────────────────────────────
-echo ""
 echo "📦 [3/5] Checking pnpm + pm2..."
 if ! command -v pnpm &>/dev/null; then
-  echo "   Installing pnpm globally..."
-  sudo npm install -g pnpm
-else
-  echo "   pnpm $(pnpm -v) already installed ✅"
+  echo "   Installing pnpm..."
+  sudo npm install -g pnpm > /dev/null 2>&1
 fi
+echo "   ✅ pnpm $(pnpm -v)"
 if ! command -v pm2 &>/dev/null; then
-  echo "   Installing pm2 globally..."
-  sudo npm install -g pm2
-else
-  echo "   pm2 $(pm2 -v) already installed ✅"
+  echo "   Installing pm2..."
+  sudo npm install -g pm2 > /dev/null 2>&1
 fi
+echo "   ✅ pm2 $(pm2 -v 2>/dev/null || echo 'installed')"
 
 # ── 4. Clone or update repo ───────────────────────────
-echo ""
-echo "📦 [4/5] Getting sats.fast source code..."
+echo "📦 [4/5] Getting source code..."
 if [ -d "$INSTALL_DIR/.git" ]; then
-  echo "   Updating existing installation at $INSTALL_DIR..."
   cd "$INSTALL_DIR"
-  git pull --rebase
+  git pull --rebase -q
   echo "   ✅ Updated to latest"
 else
-  echo "   Cloning into $INSTALL_DIR..."
   sudo mkdir -p "$INSTALL_DIR"
   sudo chown "$USER:$USER" "$INSTALL_DIR"
-  git clone https://github.com/pseudozach/sats.fast.git "$INSTALL_DIR"
+  git clone -q https://github.com/pseudozach/sats.fast.git "$INSTALL_DIR"
   cd "$INSTALL_DIR"
-  echo "   ✅ Cloned"
+  echo "   ✅ Cloned into $INSTALL_DIR"
 fi
 
 # ── 5. Install dependencies + build ───────────────────
-echo ""
-echo "📦 [5/5] Installing dependencies + building..."
-echo "   Running pnpm install (this may take a minute)..."
-pnpm install --frozen-lockfile 2>/dev/null || pnpm install
+echo "📦 [5/5] Installing deps + building..."
+pnpm install --frozen-lockfile > /dev/null 2>&1 || pnpm install --silent 2>&1 | tail -1
 echo "   ✅ Dependencies installed"
-echo "   Building all packages..."
-pnpm build
+pnpm build 2>&1 | grep -E '(Done|Build success|error)' || true
 echo "   ✅ Build complete"
 
 # ── 6. Interactive configuration ──────────────────────
