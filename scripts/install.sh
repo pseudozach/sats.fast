@@ -130,15 +130,20 @@ fi
 echo "📦 [4/5] Getting source code..."
 if [ -d "$INSTALL_DIR/.git" ]; then
   cd "$INSTALL_DIR"
-  git pull --rebase -q
-  echo "   ✅ Updated to latest"
-else
-  sudo mkdir -p "$INSTALL_DIR"
-  sudo chown "$USER:$USER" "$INSTALL_DIR"
-  git clone -q https://github.com/pseudozach/sats.fast.git "$INSTALL_DIR"
-  cd "$INSTALL_DIR"
-  echo "   ✅ Cloned into $INSTALL_DIR"
+  # Preserve .env and data/ across reinstall
+  [ -f .env ] && cp .env /tmp/sats-fast-env-backup
+  [ -d data ] && cp -r data /tmp/sats-fast-data-backup
+  cd /
+  sudo rm -rf "$INSTALL_DIR"
 fi
+sudo mkdir -p "$INSTALL_DIR"
+sudo chown "$USER:$USER" "$INSTALL_DIR"
+git clone -q https://github.com/pseudozach/sats.fast.git "$INSTALL_DIR"
+cd "$INSTALL_DIR"
+# Restore .env and data/ if they existed
+[ -f /tmp/sats-fast-env-backup ] && mv /tmp/sats-fast-env-backup "$INSTALL_DIR/.env"
+[ -d /tmp/sats-fast-data-backup ] && mv /tmp/sats-fast-data-backup "$INSTALL_DIR/data"
+echo "   ✅ Cloned into $INSTALL_DIR"
 
 # ── 5. Install dependencies + build ───────────────────
 echo "📦 [5/5] Installing deps + building..."
