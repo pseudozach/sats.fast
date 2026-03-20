@@ -4,6 +4,7 @@ data/
 .env
 *.db
 *.db-journal
+*.tsbuildinfo
 coverage/
 .turbo/
 logs/

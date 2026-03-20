@@ -147,19 +147,69 @@ echo "   ✅ Cloned into $INSTALL_DIR"
 
 # ── 5. Install dependencies + build ───────────────────
 echo "📦 [5/5] Installing deps + building..."
-pnpm install --frozen-lockfile > /dev/null 2>&1 || pnpm install > /dev/null 2>&1
-echo "   ✅ Dependencies installed"
-# Build shared first — other packages depend on its dist/
-pnpm --filter @sats-fast/shared build 2>&1 | tail -3
-echo "   ✅ shared built"
-set +e
-pnpm --filter '!@sats-fast/shared' -r build 2>&1 | tail -20
-BUILD_EXIT=$?
-set -e
-if [ $BUILD_EXIT -ne 0 ]; then
-  echo "   ⚠️  Build had errors (exit $BUILD_EXIT) — check output above"
+set +eo pipefail
+INSTALL_OUT=$(pnpm install --frozen-lockfile 2>&1)
+INSTALL_RC=$?
+if [ $INSTALL_RC -ne 0 ]; then
+  echo "   Lockfile mismatch (pnpm $(pnpm -v) vs repo lockfile) — running fresh install..."
+  INSTALL_OUT=$(pnpm install 2>&1)
+  INSTALL_RC=$?
+fi
+set -eo pipefail
+if [ $INSTALL_RC -ne 0 ]; then
+  echo "   ❌ pnpm install failed:"
+  echo "$INSTALL_OUT" | tail -10
 else
-  echo "   ✅ Build complete"
+  echo "   ✅ Dependencies installed"
+fi
+
+# Verify workspace links
+if ls "$INSTALL_DIR/node_modules/@sats-fast/shared/package.json" > /dev/null 2>&1; then
+  echo "   ✅ Workspace links OK"
+else
+  echo "   ⚠️  Workspace links missing. Diagnosing..."
+  echo "   pnpm=$(pnpm -v)  node=$(node -v)"
+  ls -la "$INSTALL_DIR/node_modules/@sats-fast/" 2>/dev/null || echo "   node_modules/@sats-fast/ does not exist"
+  ls -la "$INSTALL_DIR/packages/receipts/node_modules/@sats-fast/" 2>/dev/null || echo "   receipts/node_modules/@sats-fast/ does not exist"
+fi
+
+# Clean stale tsbuildinfo (incremental cache breaks fresh clones)
+find "$INSTALL_DIR" -name 'tsconfig.tsbuildinfo' -delete 2>/dev/null || true
+
+# Build each package sequentially in dependency order
+echo "   Building packages..."
+set +eo pipefail
+BUILD_FAIL=0
+for pkg in shared policy receipts wallet-spark wallet-liquid agent; do
+  BUILD_OUT=$(pnpm --filter "@sats-fast/$pkg" build 2>&1)
+  RC=$?
+  if [ $RC -ne 0 ]; then
+    echo "   ❌ @sats-fast/$pkg FAILED (exit $RC):"
+    echo "$BUILD_OUT"
+    BUILD_FAIL=1
+  else
+    echo "   ✅ $pkg"
+  fi
+done
+for app in bot admin; do
+  BUILD_OUT=$(pnpm --filter "@sats-fast/$app" build 2>&1)
+  RC=$?
+  if [ $RC -ne 0 ]; then
+    echo "   ❌ @sats-fast/$app FAILED (exit $RC):"
+    echo "$BUILD_OUT"
+    BUILD_FAIL=1
+  else
+    echo "   ✅ $app"
+  fi
+done
+set -eo pipefail
+
+if [ "$BUILD_FAIL" = "1" ]; then
+  echo ""
+  echo "   ⚠️  Some packages failed — check output above"
+  echo "   Continuing with what we have..."
+else
+  echo "   ✅ All packages built"
 fi
 
 # ── 6. Interactive configuration ──────────────────────
@@ -169,8 +219,6 @@ if [ -f "$INSTALL_DIR/.env" ]; then
   read -rp "  Reconfigure? (y/N): " RECONFIGURE
   if [[ ! "$RECONFIGURE" =~ ^[Yy]$ ]]; then
     echo "   Keeping existing config ✅"
-    # Source existing values for migration/pm2 steps
-    export $(grep -v '^#' "$INSTALL_DIR/.env" | xargs) 2>/dev/null || true
     SKIP_CONFIG=1
   fi
 fi
@@ -275,21 +323,32 @@ fi
 
 # ── 9. pm2 ─────────────────────────────────────────────
 echo "🚀 Starting services with pm2..."
-# Source .env so pm2 ecosystem picks up the right cwd
 cd "$INSTALL_DIR"
-set -a
-source "$INSTALL_DIR/.env" 2>/dev/null || true
-set +a
+
+# Verify dist files exist
+if [ ! -f "$INSTALL_DIR/apps/bot/dist/index.js" ]; then
+  echo "   ❌ apps/bot/dist/index.js not found — bot build failed"
+fi
+if [ ! -f "$INSTALL_DIR/apps/admin/dist/index.js" ]; then
+  echo "   ❌ apps/admin/dist/index.js not found — admin build failed"
+fi
+
+set +eo pipefail
 pm2 delete sats-fast-bot 2>/dev/null || true
 pm2 delete sats-fast-admin 2>/dev/null || true
 echo "   Starting pm2 processes..."
-pm2 start ecosystem.config.js 2>&1 | tail -10
-sleep 2
-pm2 save > /dev/null 2>&1
-pm2 startup -u "$USER" --hp "$HOME" 2>&1 | grep -E 'sudo|startup' | head -3 || true
+pm2 start ecosystem.config.js 2>&1
+sleep 3
 echo ""
 echo "   📋 pm2 status:"
 pm2 list
+pm2 save > /dev/null 2>&1
+SU_CMD=$(pm2 startup 2>&1 | grep 'sudo' | head -1)
+if [ -n "$SU_CMD" ]; then
+  echo "   Running pm2 startup command..."
+  eval "$SU_CMD" > /dev/null 2>&1 || true
+fi
+set -eo pipefail
 echo ""
 
 # ── 10. Nginx reverse proxy ────────────────────────────
