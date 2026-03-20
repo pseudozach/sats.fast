@@ -150,10 +150,10 @@ echo "📦 [5/5] Installing deps + building..."
 pnpm install --frozen-lockfile > /dev/null 2>&1 || pnpm install > /dev/null 2>&1
 echo "   ✅ Dependencies installed"
 # Build shared first — other packages depend on its dist/
-pnpm --filter @sats-fast/shared build 2>&1 | tail -5
+pnpm --filter @sats-fast/shared build 2>&1 | tail -3
 echo "   ✅ shared built"
 set +e
-pnpm -r build 2>&1 | tail -20
+pnpm --filter '!@sats-fast/shared' -r build 2>&1 | tail -20
 BUILD_EXIT=$?
 set -e
 if [ $BUILD_EXIT -ne 0 ]; then
@@ -275,12 +275,22 @@ fi
 
 # ── 9. pm2 ─────────────────────────────────────────────
 echo "🚀 Starting services with pm2..."
-pm2 delete sats-fast-bot > /dev/null 2>&1 || true
-pm2 delete sats-fast-admin > /dev/null 2>&1 || true
-pm2 start ecosystem.config.js > /dev/null 2>&1
+# Source .env so pm2 ecosystem picks up the right cwd
+cd "$INSTALL_DIR"
+set -a
+source "$INSTALL_DIR/.env" 2>/dev/null || true
+set +a
+pm2 delete sats-fast-bot 2>/dev/null || true
+pm2 delete sats-fast-admin 2>/dev/null || true
+echo "   Starting pm2 processes..."
+pm2 start ecosystem.config.js 2>&1 | tail -10
+sleep 2
 pm2 save > /dev/null 2>&1
-pm2 startup -u "$USER" --hp "$HOME" > /dev/null 2>&1 || true
-echo "   ✅ pm2 started + configured"
+pm2 startup -u "$USER" --hp "$HOME" 2>&1 | grep -E 'sudo|startup' | head -3 || true
+echo ""
+echo "   📋 pm2 status:"
+pm2 list
+echo ""
 
 # ── 10. Nginx reverse proxy ────────────────────────────
 echo "🌐 Configuring nginx..."
@@ -336,6 +346,9 @@ echo "  ⚠️  Back up your .env file — it contains"
 echo "     your encryption key and credentials."
 echo "  ─────────────────────────────────────"
 echo ""
+echo "  📜 Tailing logs (Ctrl+C to stop)..."
+echo ""
+pm2 logs --lines 30
 
 } # end main
 
