@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ─────────────────────────────────────────────────────────
 #  sats.fast installer
-#  Target: Ubuntu 22.04 / Debian 12
+#  Target: Ubuntu 22+, Debian 12+, Amazon Linux 2023, RHEL/Fedora
 #  Usage:  curl -sSL https://raw.githubusercontent.com/pseudozach/sats.fast/main/scripts/install.sh | bash
 # ─────────────────────────────────────────────────────────
 
@@ -18,18 +18,85 @@ echo "  ────────────────────────
 echo ""
 
 # Ensure we can read from terminal even when piped
-exec </dev/tty
+if [ -t 0 ]; then
+  : # stdin is already a terminal
+elif [ -e /dev/tty ]; then
+  exec </dev/tty
+else
+  echo "  ❌ Cannot open /dev/tty for interactive input."
+  echo "  Download and run the script directly instead:"
+  echo "    curl -O https://raw.githubusercontent.com/pseudozach/sats.fast/main/scripts/install.sh"
+  echo "    bash install.sh"
+  exit 1
+fi
+
+# ── Detect OS ─────────────────────────────────────────
+detect_os() {
+  if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS_ID="${ID:-unknown}"
+    OS_ID_LIKE="${ID_LIKE:-}"
+  else
+    OS_ID="unknown"
+    OS_ID_LIKE=""
+  fi
+
+  case "$OS_ID" in
+    ubuntu|debian)     PKG_MANAGER="apt" ;;
+    amzn|fedora|rhel|centos|rocky|almalinux)  PKG_MANAGER="dnf" ;;
+    *)
+      case "$OS_ID_LIKE" in
+        *debian*|*ubuntu*)  PKG_MANAGER="apt" ;;
+        *rhel*|*fedora*)    PKG_MANAGER="dnf" ;;
+        *)
+          if command -v apt-get &>/dev/null; then
+            PKG_MANAGER="apt"
+          elif command -v dnf &>/dev/null; then
+            PKG_MANAGER="dnf"
+          elif command -v yum &>/dev/null; then
+            PKG_MANAGER="yum"
+          else
+            echo "  ❌ No supported package manager found (apt/dnf/yum)."
+            exit 1
+          fi
+          ;;
+      esac
+      ;;
+  esac
+
+  echo "  OS: ${PRETTY_NAME:-$OS_ID} (using $PKG_MANAGER)"
+}
+detect_os
 
 # ── 1. System packages ────────────────────────────────
+echo ""
 echo "📦 Installing system packages..."
-sudo apt-get update -qq
-sudo apt-get install -y git curl sqlite3 nginx build-essential
+case "$PKG_MANAGER" in
+  apt)
+    sudo apt-get update -qq
+    sudo apt-get install -y git curl sqlite3 nginx build-essential openssl
+    ;;
+  dnf)
+    sudo dnf install -y git curl sqlite nginx gcc gcc-c++ make openssl
+    ;;
+  yum)
+    sudo yum install -y git curl sqlite nginx gcc gcc-c++ make openssl
+    ;;
+esac
 
-# ── 2. Node.js 22 via NodeSource ──────────────────────
+# ── 2. Node.js 22 ────────────────────────────────────
 if ! command -v node &>/dev/null || [[ $(node -v | cut -d. -f1 | tr -d 'v') -lt 22 ]]; then
   echo "📦 Installing Node.js 22..."
-  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-  sudo apt-get install -y nodejs
+  case "$PKG_MANAGER" in
+    apt)
+      curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+      sudo apt-get install -y nodejs
+      ;;
+    dnf|yum)
+      curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo -E bash -
+      sudo $PKG_MANAGER install -y nodejs
+      ;;
+  esac
 fi
 echo "   Node.js $(node -v)"
 
@@ -149,7 +216,16 @@ pm2 startup -u "$USER" --hp "$HOME" 2>/dev/null || true
 # ── 10. Nginx reverse proxy ────────────────────────────
 SERVER_IP=$(curl -4 -s ifconfig.me 2>/dev/null || echo "localhost")
 
-sudo tee /etc/nginx/sites-available/sats-fast > /dev/null <<EOF
+# Nginx config location differs by distro
+if [ -d /etc/nginx/sites-available ]; then
+  NGINX_CONF="/etc/nginx/sites-available/sats-fast"
+  NGINX_LINK="/etc/nginx/sites-enabled/sats-fast"
+else
+  NGINX_CONF="/etc/nginx/conf.d/sats-fast.conf"
+  NGINX_LINK=""
+fi
+
+sudo tee "$NGINX_CONF" > /dev/null <<EOF
 server {
     listen 80;
     server_name $SERVER_IP;
@@ -166,9 +242,12 @@ server {
 }
 EOF
 
-sudo ln -sf /etc/nginx/sites-available/sats-fast /etc/nginx/sites-enabled/
-sudo rm -f /etc/nginx/sites-enabled/default
-sudo nginx -t && sudo systemctl reload nginx
+if [ -n "$NGINX_LINK" ]; then
+  sudo ln -sf "$NGINX_CONF" "$NGINX_LINK"
+  sudo rm -f /etc/nginx/sites-enabled/default
+fi
+
+sudo nginx -t && sudo systemctl enable nginx && sudo systemctl reload nginx
 
 # ── Done! ──────────────────────────────────────────────
 echo ""
