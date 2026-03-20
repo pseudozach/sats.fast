@@ -98,7 +98,7 @@ export async function getProviderConfig(userId: number) {
     provider === 'openai'
       ? process.env.DEFAULT_OPENAI_KEY || ''
       : process.env.DEFAULT_ANTHROPIC_KEY || '';
-  const model = process.env.DEFAULT_AI_MODEL || 'claude-sonnet-4-20250514';
+  const model = process.env.DEFAULT_AI_MODEL || 'claude-sonnet-4-6';
 
   return { provider, apiKey, model };
 }
@@ -114,7 +114,7 @@ export async function setProviderConfig(
 ): Promise<void> {
   const db = getDb();
   const defaultModel =
-    provider === 'anthropic' ? 'claude-sonnet-4-20250514' : 'gpt-4o-mini';
+    provider === 'anthropic' ? 'claude-sonnet-4-6' : 'gpt-4o-mini';
 
   // Delete existing config
   await db.delete(providerConfigs).where(eq(providerConfigs.userId, userId));

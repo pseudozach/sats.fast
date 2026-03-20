@@ -36,7 +36,7 @@ function createLLM(config: AgentConfig): BaseChatModel {
   // Default: Anthropic
   return new ChatAnthropic({
     anthropicApiKey: config.apiKey,
-    modelName: config.model || 'claude-sonnet-4-20250514',
+    modelName: config.model || 'claude-sonnet-4-6',
     temperature: 0,
   }) as unknown as BaseChatModel;
 }
