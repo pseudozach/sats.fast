@@ -7,6 +7,8 @@ set -euo pipefail
 #  Usage:  curl -sSL https://raw.githubusercontent.com/pseudozach/sats.fast/main/scripts/install.sh | bash
 # ─────────────────────────────────────────────────────────
 
+main() {
+
 INSTALL_DIR="/opt/sats-fast"
 DATA_DIR="$INSTALL_DIR/data"
 
@@ -184,3 +186,7 @@ echo "  ⚠️  Back up your .env file — it contains"
 echo "     your encryption key and credentials."
 echo "  ─────────────────────────────────────"
 echo ""
+
+} # end main
+
+main "$@"
