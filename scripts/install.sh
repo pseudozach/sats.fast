@@ -163,14 +163,11 @@ else
   echo "   ✅ Dependencies installed"
 fi
 
-# Verify workspace links
-if ls "$INSTALL_DIR/node_modules/@sats-fast/shared/package.json" > /dev/null 2>&1; then
+# Verify workspace links (pnpm puts them inside each package's node_modules)
+if [ -L "$INSTALL_DIR/packages/receipts/node_modules/@sats-fast/shared" ]; then
   echo "   ✅ Workspace links OK"
 else
-  echo "   ⚠️  Workspace links missing. Diagnosing..."
-  echo "   pnpm=$(pnpm -v)  node=$(node -v)"
-  ls -la "$INSTALL_DIR/node_modules/@sats-fast/" 2>/dev/null || echo "   node_modules/@sats-fast/ does not exist"
-  ls -la "$INSTALL_DIR/packages/receipts/node_modules/@sats-fast/" 2>/dev/null || echo "   receipts/node_modules/@sats-fast/ does not exist"
+  echo "   ⚠️  Workspace links may be missing — build errors possible"
 fi
 
 # Clean stale tsbuildinfo (incremental cache breaks fresh clones)
@@ -397,17 +394,15 @@ echo ""
 echo "  Admin panel:  http://$SERVER_IP/"
 echo "  Telegram bot: running via pm2"
 echo ""
-echo "  Logs:   pm2 logs"
-echo "  Stop:   pm2 stop all"
-echo "  Status: pm2 status"
+echo "  Bot logs:   pm2 logs sats-fast-bot"
+echo "  Admin logs: pm2 logs sats-fast-admin"
+echo "  Stop:       pm2 stop all"
+echo "  Status:     pm2 status"
 echo ""
 echo "  ⚠️  Back up your .env file — it contains"
 echo "     your encryption key and credentials."
 echo "  ─────────────────────────────────────"
 echo ""
-echo "  📜 Tailing logs (Ctrl+C to stop)..."
-echo ""
-pm2 logs --lines 30
 
 } # end main
 
