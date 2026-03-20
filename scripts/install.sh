@@ -71,26 +71,31 @@ detect_os
 
 # ── 1. System packages ────────────────────────────────
 echo ""
-echo "📦 [1/5] Installing system packages..."
-case "$PKG_MANAGER" in
-  apt)
-    sudo apt-get update -qq 2>&1 | tail -1
-    sudo apt-get install -y -qq git curl sqlite3 nginx build-essential openssl > /dev/null
-    ;;
-  dnf)
-    # Amazon Linux ships curl-minimal which conflicts with curl — skip it
-    sudo dnf install -q -y git sqlite nginx gcc gcc-c++ make openssl 2>&1 | grep -v "already installed" || true
-    ;;
-  yum)
-    sudo yum install -q -y git sqlite nginx gcc gcc-c++ make openssl 2>&1 | grep -v "already installed" || true
-    ;;
-esac
-echo "   ✅ System packages installed"
+if command -v git &>/dev/null && command -v nginx &>/dev/null && command -v gcc &>/dev/null; then
+  echo "📦 [1/5] System packages — already installed ✅"
+else
+  echo "📦 [1/5] Installing system packages..."
+  case "$PKG_MANAGER" in
+    apt)
+      sudo apt-get update -qq 2>&1 | tail -1
+      sudo apt-get install -y -qq git curl sqlite3 nginx build-essential openssl > /dev/null
+      ;;
+    dnf)
+      # Amazon Linux ships curl-minimal which conflicts with curl — skip it
+      sudo dnf install -q -y git sqlite nginx gcc gcc-c++ make openssl > /dev/null 2>&1 || true
+      ;;
+    yum)
+      sudo yum install -q -y git sqlite nginx gcc gcc-c++ make openssl > /dev/null 2>&1 || true
+      ;;
+  esac
+  echo "   ✅ System packages installed"
+fi
 
 # ── 2. Node.js 22 ────────────────────────────────────
-echo "📦 [2/5] Checking Node.js..."
-if ! command -v node &>/dev/null || [[ $(node -v | cut -d. -f1 | tr -d 'v') -lt 22 ]]; then
-  echo "   Installing Node.js 22..."
+if command -v node &>/dev/null && [[ $(node -v | cut -d. -f1 | tr -d 'v') -ge 22 ]]; then
+  echo "📦 [2/5] Node.js $(node -v) — already installed ✅"
+else
+  echo "📦 [2/5] Installing Node.js 22..."
   case "$PKG_MANAGER" in
     apt)
       curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - > /dev/null 2>&1
@@ -101,21 +106,25 @@ if ! command -v node &>/dev/null || [[ $(node -v | cut -d. -f1 | tr -d 'v') -lt 
       sudo $PKG_MANAGER install -q -y nodejs > /dev/null 2>&1
       ;;
   esac
+  echo "   ✅ Node.js $(node -v)"
 fi
-echo "   ✅ Node.js $(node -v)"
 
 # ── 3. pnpm + pm2 ─────────────────────────────────────
 echo "📦 [3/5] Checking pnpm + pm2..."
-if ! command -v pnpm &>/dev/null; then
+if command -v pnpm &>/dev/null; then
+  echo "   pnpm $(pnpm -v) ✅"
+else
   echo "   Installing pnpm..."
   sudo npm install -g pnpm > /dev/null 2>&1
+  echo "   pnpm $(pnpm -v) ✅"
 fi
-echo "   ✅ pnpm $(pnpm -v)"
-if ! command -v pm2 &>/dev/null; then
+if command -v pm2 &>/dev/null; then
+  echo "   pm2 $(pm2 -v 2>/dev/null) ✅"
+else
   echo "   Installing pm2..."
   sudo npm install -g pm2 > /dev/null 2>&1
+  echo "   pm2 $(pm2 -v 2>/dev/null) ✅"
 fi
-echo "   ✅ pm2 $(pm2 -v 2>/dev/null || echo 'installed')"
 
 # ── 4. Clone or update repo ───────────────────────────
 echo "📦 [4/5] Getting source code..."
@@ -139,6 +148,19 @@ pnpm build 2>&1 | grep -E '(Done|Build success|error)' || true
 echo "   ✅ Build complete"
 
 # ── 6. Interactive configuration ──────────────────────
+if [ -f "$INSTALL_DIR/.env" ]; then
+  echo ""
+  echo "  🔧 Existing .env found at $INSTALL_DIR/.env"
+  read -rp "  Reconfigure? (y/N): " RECONFIGURE
+  if [[ ! "$RECONFIGURE" =~ ^[Yy]$ ]]; then
+    echo "   Keeping existing config ✅"
+    # Source existing values for migration/pm2 steps
+    export $(grep -v '^#' "$INSTALL_DIR/.env" | xargs) 2>/dev/null || true
+    SKIP_CONFIG=1
+  fi
+fi
+
+if [ "${SKIP_CONFIG:-0}" = "0" ]; then
 echo ""
 echo "  🔧 Configuration"
 echo "  ─────────────────────────────────────"
@@ -172,7 +194,7 @@ while true; do
   echo "  ⚠️  Passwords don't match or are empty. Try again."
 done
 
-ADMIN_PASSWORD_HASH=$(node -e "const b=require('bcryptjs');console.log(b.hashSync('$ADMIN_PASSWORD',10))")
+ADMIN_PASSWORD_HASH=$(node -e "const b=require('$INSTALL_DIR/apps/admin/node_modules/bcryptjs');console.log(b.hashSync('$ADMIN_PASSWORD',10))")
 
 echo ""
 echo "  AI Provider (users can override per-user)"
@@ -213,31 +235,27 @@ EOF
 
 chmod 600 "$INSTALL_DIR/.env"
 echo "   ✅ .env written to $INSTALL_DIR/.env"
+fi # end SKIP_CONFIG
 
 # ── 8. Run migrations ───────────────────────────────
 echo ""
 echo "🗄️  Running database migrations..."
 mkdir -p "$DATA_DIR"
-pnpm db:migrate
-echo "   ✅ Database ready at $DATA_DIR/sats.db"
+pnpm db:migrate 2>&1 | tail -2
+echo "   ✅ Database ready"
 
 # ── 9. pm2 ─────────────────────────────────────────────
-echo ""
 echo "🚀 Starting services with pm2..."
-pm2 delete sats-fast-bot 2>/dev/null || true
-pm2 delete sats-fast-admin 2>/dev/null || true
-pm2 start ecosystem.config.js
-echo "   ✅ Bot and admin panel started"
-echo "   Saving pm2 config..."
-pm2 save
-pm2 startup -u "$USER" --hp "$HOME" 2>/dev/null || true
-echo "   ✅ pm2 configured for auto-restart"
+pm2 delete sats-fast-bot > /dev/null 2>&1 || true
+pm2 delete sats-fast-admin > /dev/null 2>&1 || true
+pm2 start ecosystem.config.js > /dev/null 2>&1
+pm2 save > /dev/null 2>&1
+pm2 startup -u "$USER" --hp "$HOME" > /dev/null 2>&1 || true
+echo "   ✅ pm2 started + configured"
 
 # ── 10. Nginx reverse proxy ────────────────────────────
-echo ""
-echo "🌐 Configuring nginx reverse proxy..."
+echo "🌐 Configuring nginx..."
 SERVER_IP=$(curl -4 -s ifconfig.me 2>/dev/null || echo "localhost")
-echo "   Server IP: $SERVER_IP"
 
 # Nginx config location differs by distro
 if [ -d /etc/nginx/sites-available ]; then
@@ -270,8 +288,8 @@ if [ -n "$NGINX_LINK" ]; then
   sudo rm -f /etc/nginx/sites-enabled/default
 fi
 
-sudo nginx -t && sudo systemctl enable nginx && sudo systemctl reload nginx
-echo "   ✅ Nginx configured"
+sudo nginx -t > /dev/null 2>&1 && sudo systemctl enable nginx > /dev/null 2>&1 && sudo systemctl reload nginx > /dev/null 2>&1
+echo "   ✅ Nginx → http://$SERVER_IP/"
 
 # ── Done! ──────────────────────────────────────────────
 echo ""
