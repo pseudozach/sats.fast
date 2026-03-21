@@ -461,6 +461,7 @@ export class LiquidAdapter {
   /**
    * Swap L-BTC → USDT via self-payment on Liquid network.
    * Uses the Breez SDK's cross-asset payment feature (SideSwap under the hood).
+   * Auto-retries with decreasing amounts if fees cause "not enough funds".
    *
    * @param usdtAmount - The desired amount of USDT to receive.
    */
@@ -468,14 +469,14 @@ export class LiquidAdapter {
     userId: string,
     mnemonic: string,
     usdtAmount: number
-  ): Promise<{ feesSat: number; estimatedAssetFees?: number; txId: string | null; payment: unknown }> {
+  ): Promise<{ feesSat: number; estimatedAssetFees?: number; txId: string | null; payment: unknown; actualUsdtAmount: number }> {
     const sdk = await this.getSdk(userId, mnemonic);
-    console.log(`[LiquidAdapter:swapLbtcToUsdt] usdtAmount=${usdtAmount}`);
+    console.log(`[LiquidAdapter:swapLbtcToUsdt] requested usdtAmount=${usdtAmount}`);
 
     // Sync wallet state first
     await sdk.sync();
 
-    // 1. Create a self-receive Liquid address (amountless)
+    // 1. Create a self-receive Liquid address (amountless) — only once
     const prepRcv = await sdk.prepareReceivePayment({
       paymentMethod: 'liquidAddress',
     });
@@ -483,34 +484,64 @@ export class LiquidAdapter {
     const selfAddress = rcvRes.destination;
     console.log(`[LiquidAdapter:swapLbtcToUsdt] selfAddress=${selfAddress.substring(0, 30)}...`);
 
-    // 2. Prepare send to self: L-BTC → USDT
-    const prepSend = await sdk.prepareSendPayment({
-      destination: selfAddress,
-      amount: {
-        type: 'asset',
-        toAsset: USDT_ASSET_ID,
-        receiverAmount: usdtAmount,
-        fromAsset: LBTC_ASSET_ID,
-      },
-    });
-    console.log(`[LiquidAdapter:swapLbtcToUsdt] feesSat=${prepSend.feesSat}, estimatedAssetFees=${prepSend.estimatedAssetFees}`);
+    // 2. Try prepare+send, reducing the amount on "not enough funds" errors
+    let currentAmount = usdtAmount;
+    const MAX_RETRIES = 5;
 
-    // 3. Execute the swap
-    const sendRes = await sdk.sendPayment({ prepareResponse: prepSend });
-    const payment = sendRes.payment as Record<string, unknown> | undefined;
-    const txId = (payment?.txId as string) ?? (payment?.id as string) ?? null;
-    console.log(`[LiquidAdapter:swapLbtcToUsdt] swap complete, txId=${txId}`);
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      try {
+        // Round to 2 decimal places (USDT precision)
+        currentAmount = Math.floor(currentAmount * 100) / 100;
+        if (currentAmount < 0.01) {
+          throw new Error(`Amount reduced below minimum (0.01 USDT) after ${attempt} retries. Original: ${usdtAmount} USDT.`);
+        }
 
-    return {
-      feesSat: prepSend.feesSat ?? 0,
-      estimatedAssetFees: prepSend.estimatedAssetFees,
-      txId,
-      payment,
-    };
+        console.log(`[LiquidAdapter:swapLbtcToUsdt] attempt ${attempt + 1}/${MAX_RETRIES}: ${currentAmount} USDT`);
+
+        const prepSend = await sdk.prepareSendPayment({
+          destination: selfAddress,
+          amount: {
+            type: 'asset',
+            toAsset: USDT_ASSET_ID,
+            receiverAmount: currentAmount,
+            fromAsset: LBTC_ASSET_ID,
+          },
+        });
+        console.log(`[LiquidAdapter:swapLbtcToUsdt] feesSat=${prepSend.feesSat}, estimatedAssetFees=${prepSend.estimatedAssetFees}, exchangeAmountSat=${prepSend.exchangeAmountSat}`);
+
+        // 3. Execute the swap
+        const sendRes = await sdk.sendPayment({ prepareResponse: prepSend });
+        const payment = sendRes.payment as Record<string, unknown> | undefined;
+        const txId = (payment?.txId as string) ?? (payment?.id as string) ?? null;
+        console.log(`[LiquidAdapter:swapLbtcToUsdt] swap complete, txId=${txId}, actualAmount=${currentAmount}`);
+
+        return {
+          feesSat: prepSend.feesSat ?? 0,
+          estimatedAssetFees: prepSend.estimatedAssetFees,
+          txId,
+          payment,
+          actualUsdtAmount: currentAmount,
+        };
+      } catch (err: any) {
+        const msg = err.message || '';
+        if (msg.includes('not enough funds') || msg.includes('insufficient') || msg.includes('InsufficientFunds')) {
+          // Reduce by 15% and retry
+          const reduced = currentAmount * 0.85;
+          console.log(`[LiquidAdapter:swapLbtcToUsdt] attempt ${attempt + 1} failed (not enough funds), reducing ${currentAmount} → ${reduced.toFixed(2)} USDT`);
+          currentAmount = reduced;
+          continue;
+        }
+        // Non-retryable error
+        throw err;
+      }
+    }
+
+    throw new Error(`Failed to swap L-BTC → USDT after ${MAX_RETRIES} attempts. Last amount tried: ${currentAmount.toFixed(2)} USDT`);
   }
 
   /**
    * Swap USDT → L-BTC via self-payment on Liquid network.
+   * Auto-retries with decreasing amounts if fees cause "not enough funds".
    *
    * @param lbtcAmountSat - The desired amount of L-BTC to receive in sats.
    */
@@ -518,13 +549,13 @@ export class LiquidAdapter {
     userId: string,
     mnemonic: string,
     lbtcAmountSat: number
-  ): Promise<{ feesSat: number; estimatedAssetFees?: number; txId: string | null; payment: unknown }> {
+  ): Promise<{ feesSat: number; estimatedAssetFees?: number; txId: string | null; payment: unknown; actualLbtcSat: number }> {
     const sdk = await this.getSdk(userId, mnemonic);
-    console.log(`[LiquidAdapter:swapUsdtToLbtc] lbtcAmountSat=${lbtcAmountSat}`);
+    console.log(`[LiquidAdapter:swapUsdtToLbtc] requested lbtcAmountSat=${lbtcAmountSat}`);
 
     await sdk.sync();
 
-    // 1. Create self-receive Liquid address
+    // 1. Create self-receive Liquid address — only once
     const prepRcv = await sdk.prepareReceivePayment({
       paymentMethod: 'liquidAddress',
     });
@@ -532,33 +563,56 @@ export class LiquidAdapter {
     const selfAddress = rcvRes.destination;
     console.log(`[LiquidAdapter:swapUsdtToLbtc] selfAddress=${selfAddress.substring(0, 30)}...`);
 
-    // 2. Prepare send to self: USDT → L-BTC
-    //    receiverAmountSat is in the "toAsset" denomination.
-    //    For L-BTC, the SDK uses sats internally but the field is receiverAmount (BTC float).
-    const lbtcAmountBtc = lbtcAmountSat / 1e8;
-    const prepSend = await sdk.prepareSendPayment({
-      destination: selfAddress,
-      amount: {
-        type: 'asset',
-        toAsset: LBTC_ASSET_ID,
-        receiverAmount: lbtcAmountBtc,
-        fromAsset: USDT_ASSET_ID,
-      },
-    });
-    console.log(`[LiquidAdapter:swapUsdtToLbtc] feesSat=${prepSend.feesSat}, estimatedAssetFees=${prepSend.estimatedAssetFees}`);
+    // 2. Try prepare+send, reducing on "not enough funds"
+    let currentSat = lbtcAmountSat;
+    const MAX_RETRIES = 5;
 
-    // 3. Execute
-    const sendRes = await sdk.sendPayment({ prepareResponse: prepSend });
-    const payment = sendRes.payment as Record<string, unknown> | undefined;
-    const txId = (payment?.txId as string) ?? (payment?.id as string) ?? null;
-    console.log(`[LiquidAdapter:swapUsdtToLbtc] swap complete, txId=${txId}`);
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      try {
+        currentSat = Math.floor(currentSat);
+        if (currentSat < 100) {
+          throw new Error(`Amount reduced below minimum (100 sats) after ${attempt} retries.`);
+        }
 
-    return {
-      feesSat: prepSend.feesSat ?? 0,
-      estimatedAssetFees: prepSend.estimatedAssetFees,
-      txId,
-      payment,
-    };
+        console.log(`[LiquidAdapter:swapUsdtToLbtc] attempt ${attempt + 1}/${MAX_RETRIES}: ${currentSat} sats`);
+
+        const lbtcAmountBtc = currentSat / 1e8;
+        const prepSend = await sdk.prepareSendPayment({
+          destination: selfAddress,
+          amount: {
+            type: 'asset',
+            toAsset: LBTC_ASSET_ID,
+            receiverAmount: lbtcAmountBtc,
+            fromAsset: USDT_ASSET_ID,
+          },
+        });
+        console.log(`[LiquidAdapter:swapUsdtToLbtc] feesSat=${prepSend.feesSat}, estimatedAssetFees=${prepSend.estimatedAssetFees}`);
+
+        const sendRes = await sdk.sendPayment({ prepareResponse: prepSend });
+        const payment = sendRes.payment as Record<string, unknown> | undefined;
+        const txId = (payment?.txId as string) ?? (payment?.id as string) ?? null;
+        console.log(`[LiquidAdapter:swapUsdtToLbtc] swap complete, txId=${txId}, actualSat=${currentSat}`);
+
+        return {
+          feesSat: prepSend.feesSat ?? 0,
+          estimatedAssetFees: prepSend.estimatedAssetFees,
+          txId,
+          payment,
+          actualLbtcSat: currentSat,
+        };
+      } catch (err: any) {
+        const msg = err.message || '';
+        if (msg.includes('not enough funds') || msg.includes('insufficient') || msg.includes('InsufficientFunds')) {
+          const reduced = currentSat * 0.85;
+          console.log(`[LiquidAdapter:swapUsdtToLbtc] attempt ${attempt + 1} failed (not enough funds), reducing ${currentSat} → ${Math.floor(reduced)} sats`);
+          currentSat = reduced;
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    throw new Error(`Failed to swap USDT → L-BTC after ${MAX_RETRIES} attempts. Last amount tried: ${currentSat} sats`);
   }
 
   /**

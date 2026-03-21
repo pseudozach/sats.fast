@@ -680,11 +680,12 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
           });
         }
 
-        // Step 6: Swap L-BTC → USDT via self-payment
+        // Step 6: Swap L-BTC → USDT via self-payment (auto-retries with smaller amounts)
         try {
           const swapResult = await liquidAdapter.swapLbtcToUsdt(userId, mnemonic, usdtAmount);
           const swapTxId = swapResult.txId ?? null;
-          console.log(`[Tool:swap_btc_to_usdt] swap done, feesSat=${swapResult.feesSat}, txId=${swapTxId}`);
+          const finalUsdt = swapResult.actualUsdtAmount;
+          console.log(`[Tool:swap_btc_to_usdt] swap done, feesSat=${swapResult.feesSat}, txId=${swapTxId}, actualUsdt=${finalUsdt}`);
 
           // Auto-save receipt with all transaction IDs
           const totalFee = receiveFee + (swapResult.feesSat ?? 0);
@@ -701,7 +702,7 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
                 liquidSwapTxId: swapTxId,
                 lightningReceiveFee: receiveFee,
                 swapFee: swapResult.feesSat,
-                usdtReceived: usdtAmount,
+                usdtReceived: finalUsdt,
                 btcPriceUsd: btcPrice,
               },
             });
@@ -712,13 +713,13 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
           return JSON.stringify({
             success: true,
             amountSatsSent: actualInvoiceAmount,
-            usdtReceived: usdtAmount,
+            usdtReceived: finalUsdt,
             lightningFee: receiveFee,
             swapFee: swapResult.feesSat,
             sparkPaymentId,
             liquidSwapTxId: swapTxId,
             receiptSaved: !!receiptSummary,
-            message: `Converted ${actualInvoiceAmount.toLocaleString()} sats → ~${usdtAmount.toFixed(2)} USDT`,
+            message: `Converted ${actualInvoiceAmount.toLocaleString()} sats → ~${finalUsdt.toFixed(2)} USDT`,
           });
         } catch (err: any) {
           console.error(`[Tool:swap_btc_to_usdt] swap error:`, err);
@@ -1165,17 +1166,18 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
           });
         }
 
-        // Get BTC price to calculate USDT amount
+        // Get BTC price to calculate a conservative initial USDT estimate
         const btcPrice = await getBtcPrice();
         if (btcPrice <= 0) {
           return JSON.stringify({ success: false, error: 'Could not fetch BTC/USD price.' });
         }
 
         const btcAmount = lbtcBalance / 1e8;
-        // Use 95% to account for slippage
-        const estimatedUsdt = btcAmount * btcPrice * 0.95;
+        // Use 85% as initial estimate — swapLbtcToUsdt will auto-retry with smaller
+        // amounts if "not enough funds" (Liquid tx fees eat ~300-500 sats flat)
+        const estimatedUsdt = btcAmount * btcPrice * 0.85;
         const usdtAmount = Math.floor(estimatedUsdt * 100) / 100;
-        console.log(`[Tool:liquid_swap_resume] lbtcBalance=${lbtcBalance}, btcPrice=${btcPrice}, usdtAmount=${usdtAmount}`);
+        console.log(`[Tool:liquid_swap_resume] lbtcBalance=${lbtcBalance}, btcPrice=${btcPrice}, initialEstimate=${usdtAmount}`);
 
         if (usdtAmount < 0.01) {
           return JSON.stringify({
@@ -1184,10 +1186,11 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
           });
         }
 
-        // Execute the L-BTC → USDT swap
+        // Execute the L-BTC → USDT swap (auto-retries with decreasing amounts internally)
         const swapResult = await liquidAdapter.swapLbtcToUsdt(userId, mnemonic, usdtAmount);
         const swapTxId = swapResult.txId ?? null;
-        console.log(`[Tool:liquid_swap_resume] swap done, feesSat=${swapResult.feesSat}, txId=${swapTxId}`);
+        const finalUsdt = swapResult.actualUsdtAmount;
+        console.log(`[Tool:liquid_swap_resume] swap done, feesSat=${swapResult.feesSat}, txId=${swapTxId}, actualUsdt=${finalUsdt}`);
 
         // Auto-save receipt
         try {
@@ -1200,7 +1203,7 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
             extra: {
               liquidSwapTxId: swapTxId,
               swapFee: swapResult.feesSat,
-              usdtReceived: usdtAmount,
+              usdtReceived: finalUsdt,
               btcPriceUsd: btcPrice,
               lbtcInput: lbtcBalance,
             },
@@ -1210,11 +1213,11 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
         return JSON.stringify({
           success: true,
           lbtcSwapped: lbtcBalance,
-          usdtReceived: usdtAmount,
+          usdtReceived: finalUsdt,
           swapFee: swapResult.feesSat,
           liquidSwapTxId: swapTxId,
           receiptSaved: true,
-          message: `Swapped ${lbtcBalance.toLocaleString()} sats L-BTC → ~${usdtAmount.toFixed(2)} USDT`,
+          message: `Swapped ${lbtcBalance.toLocaleString()} sats L-BTC → ~${finalUsdt.toFixed(2)} USDT`,
         });
       } catch (err: any) {
         console.error(`[Tool:liquid_swap_resume] ERROR:`, err);
