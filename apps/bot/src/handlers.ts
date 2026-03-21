@@ -32,7 +32,8 @@ export function registerHandlers(bot: Bot) {
           'Use /balance to see both balances.\n' +
           'Use /help for all commands.\n' +
           'Or just type in plain English — I understand!\n\n' +
-          '⚠️ *Back up your seed:* Use /exportkey to save your recovery phrase.',
+          '⚠️ *Back up your seed:* Use /exportkey to save your recovery phrase.\n\n' +
+          'What would you like to do?',
         { parse_mode: 'Markdown' }
       );
     } else {
@@ -59,7 +60,8 @@ export function registerHandlers(bot: Bot) {
         '/setkey <api_key> — Set your AI API key\n' +
         '/exportkey — Export wallet seed phrase\n' +
         '/status — Bot & wallet status\n\n' +
-        '💬 Or just type naturally: "send 5000 sats to spark1..."',
+        '💬 Or just type naturally: _"send 5000 sats to spark1..."_\n\n' +
+        'What would you like to do?',
       { parse_mode: 'Markdown' }
     );
   });
