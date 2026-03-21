@@ -15,6 +15,24 @@ import {
   resolvePendingApproval,
 } from './user-service';
 
+/**
+ * Send a message with Markdown, falling back to plain text if Telegram
+ * can't parse the entities (e.g. unmatched *, <, >, | etc.).
+ */
+async function safeSend(ctx: Context, text: string, extra?: Record<string, unknown>) {
+  try {
+    await ctx.reply(text, { parse_mode: 'Markdown', ...extra });
+  } catch (err: any) {
+    if (err?.error_code === 400 && err?.description?.includes("can't parse entities")) {
+      // Strip markdown formatting and retry as plain text
+      const plain = text.replace(/[*_`\[\]]/g, '');
+      await ctx.reply(plain, extra);
+    } else {
+      throw err;
+    }
+  }
+}
+
 export function registerHandlers(bot: Bot) {
   // ── /start ──────────────────────────────────────────
   bot.command('start', async (ctx) => {
@@ -44,25 +62,24 @@ export function registerHandlers(bot: Bot) {
   // ── /help ───────────────────────────────────────────
   bot.command('help', async (ctx) => {
     await ctx.reply(
-      '📖 *sats.fast Commands*\n\n' +
+      '📖 sats.fast Commands\n\n' +
         '/balance — Show both wallet balances\n' +
         '/deposit — Get BTC deposit address\n' +
         '/invoice [amt] — Create Lightning invoice\n' +
-        '/pay <bolt11> — Pay Lightning invoice\n' +
-        '/send <addr> <amt> — Send BTC or USDT\n' +
+        '/pay [bolt11] — Pay Lightning invoice\n' +
+        '/send [addr] [amt] — Send BTC or USDT\n' +
         '/receive — Get Liquid USDT address\n' +
         '/history — Recent transactions\n' +
         '/limits — View spending limits\n' +
-        '/setlimit <type> <amount> — Update limit\n' +
+        '/setlimit [type] [amount] — Update limit\n' +
         '/preferences — View settings\n' +
         '/provider — Current AI provider\n' +
-        '/setprovider <openai|anthropic> — Switch AI\n' +
-        '/setkey <api_key> — Set your AI API key\n' +
+        '/setprovider [openai or anthropic] — Switch AI\n' +
+        '/setkey [api_key] — Set your AI API key\n' +
         '/exportkey — Export wallet seed phrase\n' +
         '/status — Bot & wallet status\n\n' +
-        '💬 Or just type naturally: _"send 5000 sats to spark1..."_\n\n' +
-        'What would you like to do?',
-      { parse_mode: 'Markdown' }
+        '💬 Or just type naturally: "send 5000 sats to spark1..."\n\n' +
+        'What would you like to do?'
     );
   });
 
@@ -530,11 +547,11 @@ export function registerHandlers(bot: Bot) {
         const keyboard = new InlineKeyboard()
           .text('✓ Confirm', `approve:${approvalId}`)
           .text('✗ Cancel', `deny:${approvalId}`);
-        await ctx.reply(cleanMsg, { reply_markup: keyboard, parse_mode: 'Markdown' });
+        await safeSend(ctx, cleanMsg, { reply_markup: keyboard });
         return;
       }
     }
 
-    await ctx.reply(response, { parse_mode: 'Markdown' });
+    await safeSend(ctx, response);
   });
 }
