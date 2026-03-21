@@ -4,7 +4,7 @@ import { sparkAdapter } from '@sats-fast/wallet-spark';
 import { liquidAdapter, LBTC_ASSET_ID, USDT_ASSET_ID } from '@sats-fast/wallet-liquid';
 import { checkPolicy, updatePolicyRule, getPolicyRules } from '@sats-fast/policy';
 import { saveReceipt, getReceipts } from '@sats-fast/receipts';
-import { satsToBtc, satsToUsd, getBtcPrice } from '@sats-fast/shared';
+import { satsToBtc, satsToUsd, getBtcPrice, getSqlite } from '@sats-fast/shared';
 
 /**
  * Factory that creates all agent tools bound to a specific user.
@@ -352,6 +352,122 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
       schema: z.object({
         username: z.string().describe('The sats.fast username (without @sats.fast suffix)'),
       }),
+    }
+  );
+
+  const claimUsername = tool(
+    async ({ username }) => {
+      try {
+        const trimmed = username.trim().toLowerCase();
+        console.log(`[Tool:claim_username] username=${trimmed}`);
+
+        // Validate locally first
+        if (!trimmed || trimmed.length > 50) {
+          return JSON.stringify({ success: false, error: 'Username must be 1-50 characters.' });
+        }
+        if (!/^[a-z0-9_-]+$/.test(trimmed)) {
+          return JSON.stringify({ success: false, error: 'Username can only contain lowercase letters, numbers, underscore, and hyphen.' });
+        }
+        const reserved = ['admin', 'api', 'well-known', 'lnurl', 'liquid', 'health', 'claim', 'register'];
+        if (reserved.includes(trimmed)) {
+          return JSON.stringify({ success: false, error: 'This username is reserved. Try another one.' });
+        }
+
+        // Get spark public key and liquid address automatically
+        const [sparkPubKey, liquidAddr] = await Promise.all([
+          sparkAdapter.getIdentityPublicKey(userId, mnemonic),
+          liquidAdapter.getAddress(userId, mnemonic).catch(() => null),
+        ]);
+
+        if (!sparkPubKey) {
+          return JSON.stringify({ success: false, error: 'Could not retrieve your Spark public key. Try again.' });
+        }
+
+        console.log(`[Tool:claim_username] sparkPubKey=${sparkPubKey.substring(0, 16)}..., liquidAddr=${liquidAddr ? 'yes' : 'no'}`);
+
+        // Call the sats.fast website registration API
+        const res = await fetch('https://sats.fast/api/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: trimmed,
+            sparkPublicKey: sparkPubKey,
+            liquidAddress: liquidAddr || undefined,
+          }),
+        });
+
+        const data = await res.json() as Record<string, unknown>;
+
+        if (data.success) {
+          console.log(`[Tool:claim_username] success → ${data.lightningAddress}`);
+          // Persist username locally so we can recall it later
+          try {
+            const sqlite = getSqlite();
+            sqlite.prepare(
+              'INSERT INTO bot_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+            ).run(`satsfast_username:${userId}`, trimmed);
+          } catch (e) { /* non-critical */ }
+          return JSON.stringify({
+            success: true,
+            username: trimmed,
+            lightningAddress: data.lightningAddress,
+            message: `Username claimed! Your Lightning Address is ${data.lightningAddress}`,
+          });
+        } else {
+          console.log(`[Tool:claim_username] failed: ${data.error}`);
+          return JSON.stringify({
+            success: false,
+            error: data.error || 'Registration failed.',
+          });
+        }
+      } catch (err: any) {
+        console.error(`[Tool:claim_username] ERROR:`, err);
+        return JSON.stringify({ success: false, error: err.message });
+      }
+    },
+    {
+      name: 'claim_username',
+      description:
+        'Claim a sats.fast username for the user. This registers their Spark public key and Liquid address ' +
+        'with the sats.fast directory so others can send them money via their Lightning Address (username@sats.fast). ' +
+        'The Spark public key and Liquid address are fetched automatically — user only needs to provide a username. ' +
+        'Returns their new Lightning Address on success.',
+      schema: z.object({
+        username: z.string().describe('The desired username (lowercase, letters/numbers/underscore/hyphen, 1-50 chars)'),
+      }),
+    }
+  );
+
+  const getMyLightningAddress = tool(
+    async () => {
+      try {
+        const sqlite = getSqlite();
+        const row = sqlite.prepare(
+          'SELECT value FROM bot_config WHERE key = ?'
+        ).get(`satsfast_username:${userId}`) as { value: string } | undefined;
+        if (row && row.value) {
+          return JSON.stringify({
+            hasUsername: true,
+            username: row.value,
+            lightningAddress: `${row.value}@sats.fast`,
+          });
+        }
+        return JSON.stringify({
+          hasUsername: false,
+          message: 'No username claimed yet. Use claim_username to get a Lightning Address.',
+        });
+      } catch (err: any) {
+        return JSON.stringify({ hasUsername: false, error: err.message });
+      }
+    },
+    {
+      name: 'get_my_lightning_address',
+      description:
+        'Check if the user has claimed a sats.fast username and get their Lightning Address. ' +
+        'Returns username and lightningAddress (e.g. satoshi@sats.fast) if claimed, ' +
+        'or hasUsername=false if not yet claimed. ' +
+        'ALWAYS call this when the user asks how to receive money, or asks about their address/username.',
+      schema: z.object({}),
     }
   );
 
@@ -1430,6 +1546,8 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
     sparkGetHistory,
     resolveLightningAddress,
     resolveSatsFastLiquid,
+    claimUsername,
+    getMyLightningAddress,
     liquidGetBalance,
     liquidGetAddress,
     liquidSendPrepare,

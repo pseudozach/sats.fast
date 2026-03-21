@@ -46,14 +46,11 @@ export function registerHandlers(bot: Bot) {
     if (isNew) {
       await safeSend(ctx,
         '🚀 *Welcome to sats.fast!*\n\n' +
-          'Your wallet has been created. You have two separate balances:\n\n' +
-          '⚡ *Lightning BTC* — instant Bitcoin via Spark\n' +
-          '💵 *Liquid USDT* — stablecoin on Liquid network\n\n' +
-          'Use /balance to see both balances.\n' +
-          'Use /help for all commands.\n' +
-          'Or just type in plain English — I understand!\n\n' +
-          '⚠️ *Back up your seed:* Use /exportkey to save your recovery phrase.\n\n' +
-          'What would you like to do?'
+          'Your wallet is ready! Now claim your username to get a Lightning Address.\n\n' +
+          'Just type a username you want, for example:\n' +
+          '"claim username satoshi"\n\n' +
+          'This gives you *satoshi@sats.fast* — share it with friends so they can send you Bitcoin instantly! ⚡\n\n' +
+          'Or use /help to see all commands.'
       );
     } else {
       await ctx.reply('👋 Welcome back! Use /balance to check your wallets or just ask me anything.');
