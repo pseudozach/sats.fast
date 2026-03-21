@@ -269,6 +269,58 @@ export class LiquidAdapter {
   // ── Cross-asset swap methods ─────────────────────────
 
   /**
+   * Estimate fees for receiving BTC via Lightning into the Liquid wallet.
+   * This is non-destructive — only calls prepare, does NOT create an invoice.
+   */
+  async estimateLightningReceiveFee(
+    userId: string,
+    mnemonic: string,
+    amountSats: number
+  ): Promise<{ feesSat: number; minSat: number; maxSat: number }> {
+    const sdk = await this.getSdk(userId, mnemonic);
+    const limits = await sdk.fetchLightningLimits();
+
+    if (amountSats < limits.receive.minSat || amountSats > limits.receive.maxSat) {
+      throw new Error(
+        `Amount ${amountSats} sats outside Lightning receive limits (${limits.receive.minSat}–${limits.receive.maxSat} sats)`
+      );
+    }
+
+    const prep = await sdk.prepareReceivePayment({
+      paymentMethod: 'bolt11Invoice',
+      amount: { type: 'bitcoin', payerAmountSat: amountSats },
+    });
+
+    return {
+      feesSat: prep.feesSat,
+      minSat: limits.receive.minSat,
+      maxSat: limits.receive.maxSat,
+    };
+  }
+
+  /**
+   * Estimate fees for sending L-BTC via Lightning out of the Liquid wallet.
+   * Uses fetchLightningLimits and prepareSendPayment for a rough estimate.
+   */
+  async estimateLightningSendFee(
+    userId: string,
+    mnemonic: string,
+    amountSats: number
+  ): Promise<{ estimatedFeeSat: number; minSat: number; maxSat: number }> {
+    const sdk = await this.getSdk(userId, mnemonic);
+    const limits = await sdk.fetchLightningLimits();
+
+    // Typical Lightning send fee is ~0.1-0.5% on Breez Liquid
+    const estimatedFeeSat = Math.max(100, Math.ceil(amountSats * 0.005));
+
+    return {
+      estimatedFeeSat,
+      minSat: limits.send.minSat,
+      maxSat: limits.send.maxSat,
+    };
+  }
+
+  /**
    * Create a Lightning (bolt11) invoice to receive BTC into the Liquid wallet as L-BTC.
    * This is used to move BTC from Spark → Liquid before swapping to USDT.
    */

@@ -310,6 +310,168 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
 
   // ── Cross-asset swap tools ───────────────────────────
 
+  const swapEstimateBtcToUsdt = tool(
+    async ({ amountSats }) => {
+      try {
+        console.log(`[Tool:swap_estimate_btc_to_usdt] amountSats=${amountSats}`);
+
+        // 1. Check Spark balance
+        const sparkBalance = await sparkAdapter.getBalance(userId, mnemonic);
+        const available = Number(sparkBalance);
+        if (available < amountSats) {
+          return JSON.stringify({
+            success: false,
+            error: `Insufficient Spark balance: ${available.toLocaleString()} sats available, need ${amountSats.toLocaleString()} sats`,
+          });
+        }
+
+        // 2. Get real-time BTC price
+        const price = await getBtcPrice();
+        if (price <= 0) {
+          return JSON.stringify({ success: false, error: 'Could not fetch BTC/USD price.' });
+        }
+
+        // 3. Estimate Lightning bridge fee (Spark → Liquid)
+        let lightningReceiveFee = 0;
+        let lnLimits = { minSat: 0, maxSat: 0 };
+        try {
+          const est = await liquidAdapter.estimateLightningReceiveFee(userId, mnemonic, amountSats);
+          lightningReceiveFee = est.feesSat;
+          lnLimits = { minSat: est.minSat, maxSat: est.maxSat };
+        } catch (err: any) {
+          return JSON.stringify({
+            success: false,
+            error: `Lightning estimate failed: ${err.message}`,
+          });
+        }
+
+        // 4. Calculate amounts
+        const lbtcAfterLnFee = amountSats - lightningReceiveFee;
+        const grossUsdt = (lbtcAfterLnFee / 1e8) * price;
+        // SideSwap typically charges ~0.1% for L-BTC ↔ USDT swaps
+        const swapSpreadPct = 0.1;
+        const swapFeeUsdt = grossUsdt * (swapSpreadPct / 100);
+        const estimatedUsdt = grossUsdt - swapFeeUsdt;
+
+        console.log(`[Tool:swap_estimate_btc_to_usdt] price=${price}, lnFee=${lightningReceiveFee}, gross=${grossUsdt.toFixed(2)}, net=${estimatedUsdt.toFixed(2)}`);
+
+        return JSON.stringify({
+          success: true,
+          input: {
+            amountSats,
+            amountBtc: (amountSats / 1e8).toFixed(8),
+            amountUsdEquiv: ((amountSats / 1e8) * price).toFixed(2),
+          },
+          fees: {
+            lightningBridgeFee: `${lightningReceiveFee} sats (~$${((lightningReceiveFee / 1e8) * price).toFixed(2)})`,
+            swapSpread: `~${swapSpreadPct}% (~$${swapFeeUsdt.toFixed(2)})`,
+            totalFeeUsd: `~$${(((lightningReceiveFee / 1e8) * price) + swapFeeUsdt).toFixed(2)}`,
+          },
+          output: {
+            estimatedUsdt: estimatedUsdt.toFixed(2),
+            note: 'Actual USDT received may vary ±1-2% due to real-time swap rates.',
+          },
+          btcPriceUsd: price,
+          lightningLimits: lnLimits,
+        });
+      } catch (err: any) {
+        console.error(`[Tool:swap_estimate_btc_to_usdt] ERROR:`, err);
+        return JSON.stringify({ success: false, error: err.message });
+      }
+    },
+    {
+      name: 'swap_estimate_btc_to_usdt',
+      description:
+        'Estimate fees and output for converting BTC → USDT WITHOUT executing. ' +
+        'Returns detailed fee breakdown: Lightning bridge fee, swap spread, estimated USDT output. ' +
+        'MUST be called before swap_btc_to_usdt so the user can review fees.',
+      schema: z.object({
+        amountSats: z.number().positive().describe('Amount of BTC to convert, in satoshis'),
+      }),
+    }
+  );
+
+  const swapEstimateUsdtToBtc = tool(
+    async ({ usdtAmount }) => {
+      try {
+        console.log(`[Tool:swap_estimate_usdt_to_btc] usdtAmount=${usdtAmount}`);
+
+        // 1. Check USDT balance
+        const bal = await liquidAdapter.getBalance(userId, mnemonic);
+        if (bal.usdtBalance < usdtAmount) {
+          return JSON.stringify({
+            success: false,
+            error: `Insufficient USDT balance: ${bal.usdtBalance.toFixed(2)} USDT available, need ${usdtAmount.toFixed(2)} USDT`,
+          });
+        }
+
+        // 2. Get real-time BTC price
+        const price = await getBtcPrice();
+        if (price <= 0) {
+          return JSON.stringify({ success: false, error: 'Could not fetch BTC/USD price.' });
+        }
+
+        // 3. Calculate amounts
+        const grossBtc = usdtAmount / price;
+        const grossSats = Math.floor(grossBtc * 1e8);
+
+        // SideSwap spread ~0.1%
+        const swapSpreadPct = 0.1;
+        const swapFeeSats = Math.ceil(grossSats * (swapSpreadPct / 100));
+        const lbtcAfterSwap = grossSats - swapFeeSats;
+
+        // 4. Estimate Lightning send fee (Liquid → Spark)
+        let lightningSendFee = 0;
+        let lnLimits = { minSat: 0, maxSat: 0 };
+        try {
+          const est = await liquidAdapter.estimateLightningSendFee(userId, mnemonic, lbtcAfterSwap);
+          lightningSendFee = est.estimatedFeeSat;
+          lnLimits = { minSat: est.minSat, maxSat: est.maxSat };
+        } catch (_) {
+          lightningSendFee = Math.max(100, Math.ceil(lbtcAfterSwap * 0.005));
+        }
+
+        const finalSats = lbtcAfterSwap - lightningSendFee;
+        const totalFeeSats = swapFeeSats + lightningSendFee;
+
+        console.log(`[Tool:swap_estimate_usdt_to_btc] price=${price}, grossSats=${grossSats}, swapFee=${swapFeeSats}, lnFee=${lightningSendFee}, net=${finalSats}`);
+
+        return JSON.stringify({
+          success: true,
+          input: {
+            usdtAmount: usdtAmount.toFixed(2),
+          },
+          fees: {
+            swapSpread: `~${swapSpreadPct}% (~${swapFeeSats.toLocaleString()} sats)`,
+            lightningBridgeFee: `~${lightningSendFee.toLocaleString()} sats`,
+            totalFeeSats: `~${totalFeeSats.toLocaleString()} sats (~$${((totalFeeSats / 1e8) * price).toFixed(2)})`,
+          },
+          output: {
+            estimatedSats: finalSats,
+            estimatedBtc: (finalSats / 1e8).toFixed(8),
+            estimatedUsd: ((finalSats / 1e8) * price).toFixed(2),
+            note: 'Actual BTC received may vary ±1-2% due to real-time swap rates.',
+          },
+          btcPriceUsd: price,
+          lightningLimits: lnLimits,
+        });
+      } catch (err: any) {
+        console.error(`[Tool:swap_estimate_usdt_to_btc] ERROR:`, err);
+        return JSON.stringify({ success: false, error: err.message });
+      }
+    },
+    {
+      name: 'swap_estimate_usdt_to_btc',
+      description:
+        'Estimate fees and output for converting USDT → BTC WITHOUT executing. ' +
+        'Returns detailed fee breakdown: swap spread, Lightning bridge fee, estimated sats output. ' +
+        'MUST be called before swap_usdt_to_btc so the user can review fees.',
+      schema: z.object({
+        usdtAmount: z.number().positive().describe('Amount of USDT to convert'),
+      }),
+    }
+  );
+
   const swapBtcToUsdt = tool(
     async ({ amountSats }) => {
       try {
@@ -417,10 +579,11 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
     {
       name: 'swap_btc_to_usdt',
       description:
-        'Convert BTC (from Spark Lightning wallet) to USDT (on Liquid). ' +
-        'Moves BTC from Spark → Liquid via Lightning, then swaps L-BTC → USDT. ' +
-        'This is a multi-step process that takes 10-60 seconds. ' +
-        'MUST call policy_check first with actionType "swap".',
+        'EXECUTE a BTC → USDT conversion. Moves BTC from Spark → Liquid via Lightning, then swaps L-BTC → USDT. ' +
+        'Takes 10-60 seconds. ' +
+        'MUST call swap_estimate_btc_to_usdt first and show fees to user. ' +
+        'MUST call policy_check with actionType "swap". ' +
+        'Only execute AFTER user confirms the fee breakdown.',
       schema: z.object({
         amountSats: z.number().positive().describe('Amount of BTC to convert, in satoshis'),
       }),
@@ -508,10 +671,11 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
     {
       name: 'swap_usdt_to_btc',
       description:
-        'Convert USDT (on Liquid) to BTC (on Spark Lightning wallet). ' +
-        'Swaps USDT → L-BTC on Liquid, then sends L-BTC to Spark via Lightning. ' +
-        'This is a multi-step process that takes 10-60 seconds. ' +
-        'MUST call policy_check first with actionType "swap".',
+        'EXECUTE a USDT → BTC conversion. Swaps USDT → L-BTC on Liquid, then sends L-BTC to Spark via Lightning. ' +
+        'Takes 10-60 seconds. ' +
+        'MUST call swap_estimate_usdt_to_btc first and show fees to user. ' +
+        'MUST call policy_check with actionType "swap". ' +
+        'Only execute AFTER user confirms the fee breakdown.',
       schema: z.object({
         usdtAmount: z.number().positive().describe('Amount of USDT to convert'),
       }),
@@ -697,6 +861,8 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
     liquidSendExecute,
     liquidReceivePrepare,
     liquidReceiveExecute,
+    swapEstimateBtcToUsdt,
+    swapEstimateUsdtToBtc,
     swapBtcToUsdt,
     swapUsdtToBtc,
     policyCheck,
