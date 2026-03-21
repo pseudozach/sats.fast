@@ -44,7 +44,7 @@ export function registerHandlers(bot: Bot) {
     const { isNew } = await getOrCreateUser(tgId, ctx.from?.username);
 
     if (isNew) {
-      await ctx.reply(
+      await safeSend(ctx,
         '🚀 *Welcome to sats.fast!*\n\n' +
           'Your wallet has been created. You have two separate balances:\n\n' +
           '⚡ *Lightning BTC* — instant Bitcoin via Spark\n' +
@@ -53,8 +53,7 @@ export function registerHandlers(bot: Bot) {
           'Use /help for all commands.\n' +
           'Or just type in plain English — I understand!\n\n' +
           '⚠️ *Back up your seed:* Use /exportkey to save your recovery phrase.\n\n' +
-          'What would you like to do?',
-        { parse_mode: 'Markdown' }
+          'What would you like to do?'
       );
     } else {
       await ctx.reply('👋 Welcome back! Use /balance to check your wallets or just ask me anything.');
@@ -80,7 +79,7 @@ export function registerHandlers(bot: Bot) {
         '/setkey [api_key] — Set your AI API key\n' +
         '/exportkey — Export wallet seed phrase\n' +
         '/status — Bot & wallet status\n\n' +
-        '💬 Or just type naturally: "send 5000 sats to spark1..."\n\n' +
+        '💬 Or just type naturally: "send 5000 sats to pseudozach@cash.app"\n\n' +
         'What would you like to do?'
     );
   });
@@ -93,13 +92,12 @@ export function registerHandlers(bot: Bot) {
     if (!user) return ctx.reply('Please run /start first.');
 
     const config = await getProviderConfig(user.id);
-    await ctx.reply(
+    await safeSend(ctx,
       '🤖 *sats.fast Status*\n\n' +
         `Bot: ✅ Online\n` +
         `AI: ${config.provider} (${config.model})\n` +
         `API Key: ${config.apiKey ? '✅ Set' : '❌ Not set'}\n` +
-        `User ID: ${user.id}`,
-      { parse_mode: 'Markdown' }
+        `User ID: ${user.id}`
     );
   });
 
@@ -134,10 +132,9 @@ export function registerHandlers(bot: Bot) {
         liquidLine += 'Balance: ⚠️ Unable to fetch';
       }
 
-      await ctx.reply(
+      await safeSend(ctx,
         sparkLine + liquidLine +
-          '\n\n_(Balances are separate. Use /send or ask me to move funds.)_',
-        { parse_mode: 'Markdown' }
+          '\n\n_(Balances are separate. Use /send or ask me to move funds.)_'
       );
     } catch (err: any) {
       await ctx.reply(`❌ Error fetching balances: ${err.message}`);
@@ -224,7 +221,7 @@ export function registerHandlers(bot: Bot) {
       config,
       { userId: tgId, dbUserId: id, mnemonic }
     );
-    await ctx.reply(response, { parse_mode: 'Markdown' });
+    await safeSend(ctx, response);
   });
 
   // ── /send <addr> <amt> ──────────────────────────────
@@ -249,7 +246,7 @@ export function registerHandlers(bot: Bot) {
       config,
       { userId: tgId, dbUserId: id, mnemonic }
     );
-    await ctx.reply(response, { parse_mode: 'Markdown' });
+    await safeSend(ctx, response);
   });
 
   // ── /receive ────────────────────────────────────────
@@ -289,7 +286,7 @@ export function registerHandlers(bot: Bot) {
     const lines = items.map((r, i) =>
       `${i + 1}. *${r.actionType}* — ${r.amountSats ? r.amountSats.toLocaleString() + ' sats' : 'N/A'} — ${r.createdAt}`
     );
-    await ctx.reply('📋 *Recent Transactions*\n\n' + lines.join('\n'), { parse_mode: 'Markdown' });
+    await safeSend(ctx, '📋 *Recent Transactions*\n\n' + lines.join('\n'));
   });
 
   // ── /limits ─────────────────────────────────────────
@@ -300,14 +297,13 @@ export function registerHandlers(bot: Bot) {
     if (!user) return ctx.reply('Please run /start first.');
 
     const rules = await getPolicyRules(user.id);
-    await ctx.reply(
+    await safeSend(ctx,
       '⚙️ *Spending Limits*\n\n' +
         `Daily limit: ${rules.dailyLimitSats.toLocaleString()} sats\n` +
         `Per-tx limit: ${rules.perTxLimitSats.toLocaleString()} sats\n` +
         `Auto-approve under: ${rules.autoApproveSats.toLocaleString()} sats\n` +
         `Autopilot: ${rules.autopilot ? '✅ On' : '❌ Off'}\n\n` +
-        'Use /setlimit <daily_limit|per_tx|auto_approve|autopilot> <value>',
-      { parse_mode: 'Markdown' }
+        'Use /setlimit to update: daily\_limit, per\_tx, auto\_approve, autopilot'
     );
   });
 
@@ -320,7 +316,7 @@ export function registerHandlers(bot: Bot) {
 
     const args = ctx.match?.trim().split(/\s+/);
     if (!args || args.length < 2) {
-      return ctx.reply('Usage: /setlimit <daily_limit|per_tx|auto_approve|autopilot> <value>');
+      return ctx.reply('Usage: /setlimit [daily_limit / per_tx / auto_approve / autopilot] [value]');
     }
 
     const field = args[0] as any;
@@ -343,14 +339,13 @@ export function registerHandlers(bot: Bot) {
     const config = await getProviderConfig(user.id);
     const rules = await getPolicyRules(user.id);
 
-    await ctx.reply(
+    await safeSend(ctx,
       '⚙️ *Preferences*\n\n' +
         `AI Provider: ${config.provider}\n` +
         `AI Model: ${config.model}\n` +
         `API Key: ${config.apiKey ? '✅ Set' : '❌ Not set'}\n` +
         `Auto-approve: under ${rules.autoApproveSats.toLocaleString()} sats\n` +
-        `Autopilot: ${rules.autopilot ? 'On' : 'Off'}`,
-      { parse_mode: 'Markdown' }
+        `Autopilot: ${rules.autopilot ? 'On' : 'Off'}`
     );
   });
 
@@ -362,7 +357,7 @@ export function registerHandlers(bot: Bot) {
     if (!user) return ctx.reply('Please run /start first.');
 
     const config = await getProviderConfig(user.id);
-    await ctx.reply(`🤖 Current AI: *${config.provider}* — ${config.model}`, { parse_mode: 'Markdown' });
+    await safeSend(ctx, `🤖 Current AI: *${config.provider}* — ${config.model}`);
   });
 
   // ── /setprovider ────────────────────────────────────
@@ -374,12 +369,12 @@ export function registerHandlers(bot: Bot) {
 
     const provider = ctx.match?.trim().toLowerCase();
     if (provider !== 'openai' && provider !== 'anthropic') {
-      return ctx.reply('Usage: /setprovider <openai|anthropic>');
+      return ctx.reply('Usage: /setprovider [openai or anthropic]');
     }
 
     const currentConfig = await getProviderConfig(user.id);
     await setProviderConfig(user.id, provider, currentConfig.apiKey, undefined);
-    await ctx.reply(`✅ AI provider switched to *${provider}*.`, { parse_mode: 'Markdown' });
+    await safeSend(ctx, `✅ AI provider switched to *${provider}*.`);
   });
 
   // ── /setkey ─────────────────────────────────────────
@@ -415,17 +410,23 @@ export function registerHandlers(bot: Bot) {
 
     // Send via DM only
     try {
-      await ctx.api.sendMessage(
-        ctx.from!.id,
-        '🔐 *Your Recovery Seed Phrase*\n\n' +
-          `\`${mnemonic}\`\n\n` +
-          '⚠️ *WARNING: This controls REAL FUNDS.*\n' +
-          '• Never share this with anyone\n' +
-          '• Store it offline in a safe place\n' +
-          '• Anyone with this phrase can access your Bitcoin and USDT\n' +
-          '• sats.fast will never ask for your seed phrase',
-        { parse_mode: 'Markdown' }
-      );
+      const seedMsg =
+        '🔐 Your Recovery Seed Phrase\n\n' +
+        `${mnemonic}\n\n` +
+        '⚠️ WARNING: This controls REAL FUNDS.\n' +
+        '• Never share this with anyone\n' +
+        '• Store it offline in a safe place\n' +
+        '• Anyone with this phrase can access your Bitcoin and USDT\n' +
+        '• sats.fast will never ask for your seed phrase';
+      try {
+        await ctx.api.sendMessage(ctx.from!.id, seedMsg, { parse_mode: 'Markdown' });
+      } catch (parseErr: any) {
+        if (parseErr?.error_code === 400 && parseErr?.description?.includes("can't parse entities")) {
+          await ctx.api.sendMessage(ctx.from!.id, seedMsg);
+        } else {
+          throw parseErr;
+        }
+      }
       if (ctx.chat?.type !== 'private') {
         await ctx.reply('📬 Seed phrase sent to your DMs.');
       }
@@ -504,7 +505,7 @@ export function registerHandlers(bot: Bot) {
           config,
           { userId: tgId, dbUserId: user.id, mnemonic }
         );
-        await ctx.reply(response, { parse_mode: 'Markdown' });
+        await safeSend(ctx, response);
       }
     }
 
