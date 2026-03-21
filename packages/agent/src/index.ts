@@ -2,7 +2,7 @@ import { createReactAgent } from '@langchain/langgraph/prebuilt';
 import { ChatOpenAI } from '@langchain/openai';
 import { ChatAnthropic } from '@langchain/anthropic';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { HumanMessage } from '@langchain/core/messages';
+import { HumanMessage, AIMessage, type BaseMessage } from '@langchain/core/messages';
 import { createUserTools } from './tools';
 import { SYSTEM_PROMPT } from './prompt';
 
@@ -19,6 +19,51 @@ interface UserContext {
   userId: string;
   dbUserId: number;
   mnemonic: string;
+}
+
+// ── Per-user conversation history ───────────────────
+const MAX_HISTORY = 20; // max messages to keep per user
+const HISTORY_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+interface ConversationEntry {
+  messages: BaseMessage[];
+  lastActivity: number;
+}
+
+const conversations = new Map<string, ConversationEntry>();
+
+/**
+ * Get (or create) conversation history for a user.
+ * Expires after HISTORY_TTL_MS of inactivity.
+ */
+function getHistory(userId: string): BaseMessage[] {
+  const entry = conversations.get(userId);
+  if (!entry) return [];
+  // Expire stale conversations
+  if (Date.now() - entry.lastActivity > HISTORY_TTL_MS) {
+    conversations.delete(userId);
+    return [];
+  }
+  return entry.messages;
+}
+
+function pushHistory(userId: string, human: string, assistant: string): void {
+  const entry = conversations.get(userId) || { messages: [], lastActivity: 0 };
+  entry.messages.push(new HumanMessage(human));
+  entry.messages.push(new AIMessage(assistant));
+  // Trim to MAX_HISTORY (keep most recent pairs)
+  while (entry.messages.length > MAX_HISTORY) {
+    entry.messages.shift();
+  }
+  entry.lastActivity = Date.now();
+  conversations.set(userId, entry);
+}
+
+/**
+ * Clear conversation history for a user.
+ */
+export function clearHistory(userId: string): void {
+  conversations.delete(userId);
 }
 
 /**
@@ -68,20 +113,29 @@ export async function runAgent(
   });
 
   try {
+    // Build messages: past conversation + new user message
+    const history = getHistory(userContext.userId);
+    const allMessages = [...history, new HumanMessage(userMessage)];
+
     const result = await agent.invoke({
-      messages: [new HumanMessage(userMessage)],
+      messages: allMessages,
     });
 
     // Extract the last AI message
     const messages = result.messages;
+    let aiResponse = 'I processed your request but have no response to show. Please try again.';
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i];
       if (msg._getType?.() === 'ai' && typeof msg.content === 'string' && msg.content.trim()) {
-        return msg.content;
+        aiResponse = msg.content;
+        break;
       }
     }
 
-    return 'I processed your request but have no response to show. Please try again.';
+    // Save to conversation history
+    pushHistory(userContext.userId, userMessage, aiResponse);
+
+    return aiResponse;
   } catch (err: any) {
     console.error('Agent error:', err);
 

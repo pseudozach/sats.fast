@@ -12,6 +12,8 @@ export declare function runAgent(
   }
 ): Promise<string>;
 
+export declare function clearHistory(userId: string): void;
+
 export declare function createUserTools(
   userId: string,
   dbUserId: number,
