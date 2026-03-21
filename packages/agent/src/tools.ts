@@ -203,6 +203,158 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
     }
   );
 
+  // ── Lightning Address & LNURL tools ───────────────────
+
+  const resolveLightningAddress = tool(
+    async ({ address, amountSats }) => {
+      try {
+        console.log(`[Tool:resolve_lightning_address] address=${address}, amountSats=${amountSats}`);
+
+        // Parse user@domain
+        const atIndex = address.indexOf('@');
+        if (atIndex < 1) {
+          return JSON.stringify({ success: false, error: 'Invalid lightning address format. Expected user@domain.' });
+        }
+        const user = address.substring(0, atIndex);
+        const domain = address.substring(atIndex + 1);
+
+        // Step 1: Fetch LNURL pay endpoint
+        const lnurlUrl = `https://${domain}/.well-known/lnurlp/${encodeURIComponent(user)}`;
+        console.log(`[Tool:resolve_lightning_address] fetching ${lnurlUrl}`);
+        const metaRes = await fetch(lnurlUrl);
+        if (!metaRes.ok) {
+          return JSON.stringify({ success: false, error: `Could not resolve lightning address: HTTP ${metaRes.status}` });
+        }
+        const meta = await metaRes.json() as Record<string, unknown>;
+
+        if (meta.tag !== 'payRequest') {
+          return JSON.stringify({ success: false, error: 'Not a valid LNURL pay endpoint.' });
+        }
+
+        // Check limits (LNURL amounts are in millisats)
+        const minSat = Math.ceil((meta.minSendable as number) / 1000);
+        const maxSat = Math.floor((meta.maxSendable as number) / 1000);
+
+        if (amountSats < minSat || amountSats > maxSat) {
+          return JSON.stringify({
+            success: false,
+            error: `Amount ${amountSats} sats outside limits for this address: ${minSat}–${maxSat.toLocaleString()} sats`,
+          });
+        }
+
+        // Step 2: Request invoice from callback
+        const amountMillisats = amountSats * 1000;
+        const callbackUrl = new URL(meta.callback as string);
+        callbackUrl.searchParams.set('amount', String(amountMillisats));
+
+        console.log(`[Tool:resolve_lightning_address] requesting invoice from ${callbackUrl.toString()}`);
+        const invoiceRes = await fetch(callbackUrl.toString());
+        if (!invoiceRes.ok) {
+          return JSON.stringify({ success: false, error: `Failed to get invoice from provider: HTTP ${invoiceRes.status}` });
+        }
+        const invoiceData = await invoiceRes.json() as Record<string, unknown>;
+
+        if (!invoiceData.pr) {
+          return JSON.stringify({ success: false, error: 'No invoice returned from lightning address provider.' });
+        }
+
+        const bolt11 = invoiceData.pr as string;
+
+        // Step 3: Estimate fee via Spark
+        let estimatedFeeSats = 0;
+        try {
+          estimatedFeeSats = await sparkAdapter.estimateFee(userId, mnemonic, bolt11);
+        } catch (_) { /* fee estimation is best-effort */ }
+
+        console.log(`[Tool:resolve_lightning_address] resolved → invoice ${bolt11.substring(0, 40)}..., fee≈${estimatedFeeSats}`);
+
+        return JSON.stringify({
+          success: true,
+          address,
+          invoice: bolt11,
+          amountSats,
+          estimatedFeeSats,
+          minSat,
+          maxSat,
+          message: `Resolved ${address} → Lightning invoice for ${amountSats.toLocaleString()} sats. Estimated routing fee: ${estimatedFeeSats} sats. Ready to pay with spark_pay_invoice.`,
+        });
+      } catch (err: any) {
+        console.error(`[Tool:resolve_lightning_address] ERROR:`, err);
+        return JSON.stringify({ success: false, error: err.message });
+      }
+    },
+    {
+      name: 'resolve_lightning_address',
+      description:
+        'Resolve a Lightning Address (user@domain) to a payable BOLT11 invoice. ' +
+        'Supports any lightning address (LNURL-pay). Fetches the LNURL pay endpoint, ' +
+        'requests an invoice for the specified amount, and estimates the routing fee. ' +
+        'After resolving, use spark_pay_invoice to pay the returned invoice. ' +
+        'The invoice is only valid for a short time, so pay it promptly after resolving.',
+      schema: z.object({
+        address: z.string().describe('Lightning address in user@domain format (e.g. pseudozach@sats.fast)'),
+        amountSats: z.number().positive().describe('Amount in satoshis to send'),
+      }),
+    }
+  );
+
+  const resolveSatsFastLiquid = tool(
+    async ({ username }) => {
+      try {
+        console.log(`[Tool:resolve_satsfast_liquid] username=${username}`);
+
+        const url = `https://sats.fast/.well-known/liquid/${encodeURIComponent(username)}`;
+        const res = await fetch(url);
+        if (!res.ok) {
+          return JSON.stringify({
+            success: false,
+            error: `Could not look up liquid address: HTTP ${res.status}`,
+            suggestion: 'Ask the recipient for their Liquid USDT address directly.',
+          });
+        }
+        const data = await res.json() as Record<string, unknown>;
+
+        if (data.status === 'ERROR' || !data.liquidAddress) {
+          const reason = (data.reason as string) || 'No liquid address found for this user.';
+          console.log(`[Tool:resolve_satsfast_liquid] not found: ${reason}`);
+          return JSON.stringify({
+            success: false,
+            error: reason,
+            suggestion: 'This user hasn\'t set up a USDT address. Ask them for their Liquid address directly.',
+          });
+        }
+
+        console.log(`[Tool:resolve_satsfast_liquid] resolved → ${data.liquidAddress}`);
+        return JSON.stringify({
+          success: true,
+          username: data.username,
+          liquidAddress: data.liquidAddress,
+          domain: data.domain,
+          message: `Resolved ${username}@sats.fast → Liquid address. Ready to send USDT.`,
+        });
+      } catch (err: any) {
+        console.error(`[Tool:resolve_satsfast_liquid] ERROR:`, err);
+        return JSON.stringify({
+          success: false,
+          error: err.message,
+          suggestion: 'Ask the recipient for their Liquid USDT address directly.',
+        });
+      }
+    },
+    {
+      name: 'resolve_satsfast_liquid',
+      description:
+        'Resolve a sats.fast username to a Liquid USDT address. ' +
+        'Use this when the user wants to send USDT to someone@sats.fast. ' +
+        'If the recipient has a Liquid address registered, returns it for use with liquid_send_prepare/execute. ' +
+        'If not found, suggests asking the recipient directly for their address. ' +
+        'Only works for @sats.fast addresses — other domains only support Lightning.',
+      schema: z.object({
+        username: z.string().describe('The sats.fast username (without @sats.fast suffix)'),
+      }),
+    }
+  );
+
   // ── Liquid USDT tools ────────────────────────────────
 
   const liquidGetBalance = tool(
@@ -1276,6 +1428,8 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
     sparkPayInvoice,
     sparkSend,
     sparkGetHistory,
+    resolveLightningAddress,
+    resolveSatsFastLiquid,
     liquidGetBalance,
     liquidGetAddress,
     liquidSendPrepare,
