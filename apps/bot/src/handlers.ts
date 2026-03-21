@@ -182,12 +182,13 @@ export function registerHandlers(bot: Bot) {
 
     try {
       const result = await sparkAdapter.createInvoice(tgId, mnemonic, amount, memo);
-      await ctx.reply(
+      // LightningReceiveRequest.invoice is an Invoice object with encodedInvoice
+      const bolt11 = result?.invoice?.encodedInvoice || result?.invoice || 'unknown';
+      await safeSend(ctx,
         '⚡ *Lightning Invoice*\n\n' +
-          `\`${result.invoice}\`\n\n` +
+          `\`${bolt11}\`\n\n` +
           `Amount: ${amount.toLocaleString()} sats\n` +
-          (memo ? `Memo: ${memo}` : ''),
-        { parse_mode: 'Markdown' }
+          (memo ? `Memo: ${memo}` : '')
       );
     } catch (err: any) {
       await ctx.reply(`❌ Error creating invoice: ${err.message}`);
