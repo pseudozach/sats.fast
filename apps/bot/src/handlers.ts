@@ -15,6 +15,7 @@ import {
   resolvePendingApproval,
 } from './user-service';
 import { qrInputFile } from './qr';
+import { watchUserSwaps } from './swap-monitor';
 
 /**
  * Send a message with Markdown, falling back to plain text if Telegram
@@ -560,6 +561,23 @@ export function registerHandlers(bot: Bot) {
     }
 
     await safeSend(ctx, response);
+
+    // Start background monitoring if the user has pending Liquid payments
+    // (e.g., swap in progress, L-BTC arriving, etc.)
+    if (liquidAdapter.hasSdk(tgId) && ctx.chat) {
+      try {
+        const bal = await liquidAdapter.getBalance(tgId, mnemonic);
+        if (
+          bal.lBtcBalanceSat > 0 ||
+          bal.pendingSendSat > 0 ||
+          bal.pendingReceiveSat > 0
+        ) {
+          await watchUserSwaps(tgId, ctx.chat.id, mnemonic, id);
+        }
+      } catch (_) {
+        /* Liquid SDK not initialized or error — skip monitoring */
+      }
+    }
 
     // Auto-attach QR code if the agent response contains an invoice or address
     const qrMatch = response.match(/(lnbc[a-z0-9]{50,}|spark1[a-z0-9]{30,}|bc1[a-z0-9]{25,}|lq1[a-z0-9]{25,})/i);

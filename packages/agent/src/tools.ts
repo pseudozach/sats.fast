@@ -644,8 +644,8 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
           } catch (_) { /* best effort */ }
 
           const statusMsg = isPending
-            ? `BTC was sent and the Lightning→Liquid swap is still processing (status: ${swapStatus}, pending: ${pendingReceive} sats). This is normal and can take 2-5 minutes. Your funds are safe. Once L-BTC arrives, call liquid_swap_resume to complete the L-BTC→USDT conversion.`
-            : `BTC was sent from Spark but L-BTC hasn't been confirmed in Liquid yet (swap status: ${swapStatus}). Your funds are in transit. Once confirmed, call liquid_swap_resume to complete the L-BTC→USDT conversion.`;
+            ? `BTC was sent and the swap is still processing (pending: ${pendingReceive} sats). This is normal and can take 2-5 minutes. Funds are safe. The conversion will complete automatically in the background and the user will be notified.`
+            : `BTC was sent from Spark but hasn't been confirmed yet. Funds are in transit. The conversion will complete automatically in the background and the user will be notified.`;
 
           return JSON.stringify({
             success: false,

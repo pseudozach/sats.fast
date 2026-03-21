@@ -31,10 +31,29 @@ interface BreezSdk {
   getPayment(req: GetPaymentRequest): Promise<BreezPayment | undefined>;
   sync(): Promise<void>;
   disconnect(): Promise<void>;
+  addEventListener(listener: { onEvent: (e: any) => void }): Promise<string>;
+  removeEventListener(id: string): Promise<void>;
 }
 
 type PaymentState = 'created' | 'pending' | 'complete' | 'failed' | 'timedOut' | 'refundable' | 'refundPending' | 'waitingFeeAcceptance';
 type PaymentType = 'receive' | 'send';
+
+/**
+ * SDK events emitted by the Breez SDK Liquid.
+ * Used by the swap monitor to listen for payment state changes.
+ */
+export type SdkEvent =
+  | { type: 'paymentFailed'; details: any }
+  | { type: 'paymentPending'; details: any }
+  | { type: 'paymentRefundable'; details: any }
+  | { type: 'paymentRefunded'; details: any }
+  | { type: 'paymentRefundPending'; details: any }
+  | { type: 'paymentSucceeded'; details: any }
+  | { type: 'paymentWaitingConfirmation'; details: any }
+  | { type: 'paymentWaitingFeeAcceptance'; details: any }
+  | { type: 'synced' }
+  | { type: 'syncFailed'; error: string }
+  | { type: 'dataSynced'; didPullNewRecords: boolean };
 
 interface BreezPayment {
   destination?: string;
@@ -642,6 +661,41 @@ export class LiquidAdapter {
       txId,
       payment,
     };
+  }
+
+  /**
+   * Check if a user already has an active SDK instance (without connecting).
+   */
+  hasSdk(userId: string): boolean {
+    return this.sdks.has(userId);
+  }
+
+  /**
+   * Register a Breez SDK event listener for a user.
+   * Returns a listenerId that can be used to remove the listener.
+   */
+  async addEventListener(
+    userId: string,
+    mnemonic: string,
+    callback: (event: SdkEvent) => void
+  ): Promise<string> {
+    const sdk = await this.getSdk(userId, mnemonic);
+    const listenerId = await sdk.addEventListener({ onEvent: callback });
+    console.log(`[LiquidAdapter:addEventListener] userId=${userId}, listenerId=${listenerId}`);
+    return listenerId;
+  }
+
+  /**
+   * Remove a Breez SDK event listener for a user.
+   */
+  async removeEventListener(
+    userId: string,
+    mnemonic: string,
+    listenerId: string
+  ): Promise<void> {
+    const sdk = await this.getSdk(userId, mnemonic);
+    await sdk.removeEventListener(listenerId);
+    console.log(`[LiquidAdapter:removeEventListener] userId=${userId}, listenerId=${listenerId}`);
   }
 
   /**

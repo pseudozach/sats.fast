@@ -8,6 +8,7 @@ import { getDb, closeDb } from '@sats-fast/shared';
 import { sparkAdapter } from '@sats-fast/wallet-spark';
 import { liquidAdapter } from '@sats-fast/wallet-liquid';
 import { registerHandlers } from './handlers';
+import { initSwapMonitor, shutdownSwapMonitor } from './swap-monitor';
 
 async function main() {
   // Validate required env vars
@@ -30,6 +31,9 @@ async function main() {
   // Create bot
   const bot = new Bot(token);
 
+  // Initialize background swap monitor
+  initSwapMonitor(bot);
+
   // Register all command and message handlers
   registerHandlers(bot);
 
@@ -42,6 +46,7 @@ async function main() {
   const shutdown = async () => {
     console.log('\n🔄 Shutting down...');
     bot.stop();
+    await shutdownSwapMonitor();
     await sparkAdapter.disposeAll();
     await liquidAdapter.disconnectAll();
     closeDb();
