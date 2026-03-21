@@ -11,6 +11,7 @@
   "packageManager": "pnpm@9.15.4",
   "scripts": {
     "update": "git pull && pnpm install && pnpm build && pm2 restart sats-fast-bot && pm2 restart sats-fast-admin && pm2 logs sats-fast-bot",
+    "update:macos": "git pull && nvm use 22 && pnpm install && pnpm build && pnpm run dev",
     "build": "pnpm -r build",
     "dev:bot": "pnpm --filter @sats-fast/bot dev",
     "dev:admin": "pnpm --filter @sats-fast/admin dev",
