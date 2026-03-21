@@ -193,14 +193,21 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
     async () => {
       try {
         const bal = await liquidAdapter.getBalance(userId, mnemonic);
-        return `💵 Liquid USDT\nBalance: ${bal.usdtBalance.toFixed(2)} USDT`;
+        const status = await liquidAdapter.getWalletStatus(userId, mnemonic);
+        const lines = [
+          `💵 Liquid USDT: ${bal.usdtBalance.toFixed(2)} USDT`,
+          `🔶 L-BTC: ${status.confirmedSat.toLocaleString()} sats`,
+        ];
+        if (status.pendingReceiveSat > 0) lines.push(`⏳ Pending receive: ${status.pendingReceiveSat.toLocaleString()} sats`);
+        if (status.pendingSendSat > 0) lines.push(`⏳ Pending send: ${status.pendingSendSat.toLocaleString()} sats`);
+        return lines.join('\n');
       } catch (err: any) {
         return `Error getting Liquid balance: ${err.message}`;
       }
     },
     {
       name: 'liquid_get_balance',
-      description: 'Get the user\'s Liquid USDT balance.',
+      description: 'Get the user\'s Liquid wallet balances: USDT, L-BTC (confirmed), and any pending amounts.',
       schema: z.object({}),
     }
   );
@@ -637,8 +644,8 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
           } catch (_) { /* best effort */ }
 
           const statusMsg = isPending
-            ? `BTC was sent and the Lightning→Liquid swap is still processing (status: ${swapStatus}, pending: ${pendingReceive} sats). This is normal and can take 2-5 minutes. Your funds are safe.`
-            : `BTC was sent from Spark but L-BTC hasn't been confirmed in Liquid yet (swap status: ${swapStatus}). Your funds are in transit — check back shortly.`;
+            ? `BTC was sent and the Lightning→Liquid swap is still processing (status: ${swapStatus}, pending: ${pendingReceive} sats). This is normal and can take 2-5 minutes. Your funds are safe. Once L-BTC arrives, call liquid_swap_resume to complete the L-BTC→USDT conversion.`
+            : `BTC was sent from Spark but L-BTC hasn't been confirmed in Liquid yet (swap status: ${swapStatus}). Your funds are in transit. Once confirmed, call liquid_swap_resume to complete the L-BTC→USDT conversion.`;
 
           return JSON.stringify({
             success: false,
@@ -1134,6 +1141,97 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
     }
   );
 
+  const liquidSwapResume = tool(
+    async () => {
+      try {
+        console.log(`[Tool:liquid_swap_resume] checking L-BTC balance...`);
+
+        // Sync and check current L-BTC balance
+        const status = await liquidAdapter.getWalletStatus(userId, mnemonic);
+        const lbtcBalance = status.confirmedSat;
+        console.log(`[Tool:liquid_swap_resume] confirmed=${lbtcBalance}, pending=${status.pendingReceiveSat}`);
+
+        if (lbtcBalance <= 0 && status.pendingReceiveSat > 0) {
+          return JSON.stringify({
+            success: false,
+            error: `No confirmed L-BTC yet, but ${status.pendingReceiveSat.toLocaleString()} sats pending. Wait a few minutes and try again.`,
+          });
+        }
+
+        if (lbtcBalance <= 0) {
+          return JSON.stringify({
+            success: false,
+            error: 'No L-BTC in Liquid wallet to swap. Nothing to resume.',
+          });
+        }
+
+        // Get BTC price to calculate USDT amount
+        const btcPrice = await getBtcPrice();
+        if (btcPrice <= 0) {
+          return JSON.stringify({ success: false, error: 'Could not fetch BTC/USD price.' });
+        }
+
+        const btcAmount = lbtcBalance / 1e8;
+        // Use 95% to account for slippage
+        const estimatedUsdt = btcAmount * btcPrice * 0.95;
+        const usdtAmount = Math.floor(estimatedUsdt * 100) / 100;
+        console.log(`[Tool:liquid_swap_resume] lbtcBalance=${lbtcBalance}, btcPrice=${btcPrice}, usdtAmount=${usdtAmount}`);
+
+        if (usdtAmount < 0.01) {
+          return JSON.stringify({
+            success: false,
+            error: `L-BTC balance too small to swap: ${lbtcBalance} sats ≈ $${(btcAmount * btcPrice).toFixed(2)}.`,
+          });
+        }
+
+        // Execute the L-BTC → USDT swap
+        const swapResult = await liquidAdapter.swapLbtcToUsdt(userId, mnemonic, usdtAmount);
+        const swapTxId = swapResult.txId ?? null;
+        console.log(`[Tool:liquid_swap_resume] swap done, feesSat=${swapResult.feesSat}, txId=${swapTxId}`);
+
+        // Auto-save receipt
+        try {
+          await saveReceipt({
+            userId: dbUserId,
+            actionType: 'swap_lbtc_to_usdt (resume)',
+            amountSats: lbtcBalance,
+            feeSats: swapResult.feesSat ?? 0,
+            txId: swapTxId ?? undefined,
+            extra: {
+              liquidSwapTxId: swapTxId,
+              swapFee: swapResult.feesSat,
+              usdtReceived: usdtAmount,
+              btcPriceUsd: btcPrice,
+              lbtcInput: lbtcBalance,
+            },
+          });
+        } catch (_) { /* best effort */ }
+
+        return JSON.stringify({
+          success: true,
+          lbtcSwapped: lbtcBalance,
+          usdtReceived: usdtAmount,
+          swapFee: swapResult.feesSat,
+          liquidSwapTxId: swapTxId,
+          receiptSaved: true,
+          message: `Swapped ${lbtcBalance.toLocaleString()} sats L-BTC → ~${usdtAmount.toFixed(2)} USDT`,
+        });
+      } catch (err: any) {
+        console.error(`[Tool:liquid_swap_resume] ERROR:`, err);
+        return JSON.stringify({ success: false, error: err.message });
+      }
+    },
+    {
+      name: 'liquid_swap_resume',
+      description:
+        'Resume/complete a stuck swap by converting any L-BTC sitting in the Liquid wallet into USDT. ' +
+        'Use this when a BTC→USDT swap timed out waiting for L-BTC confirmation, but the L-BTC has since arrived. ' +
+        'Also useful if the user has L-BTC in their Liquid wallet for any reason and wants to convert to USDT. ' +
+        'Automatically saves a receipt.',
+      schema: z.object({}),
+    }
+  );
+
   return [
     sparkGetBalance,
     sparkGetAddress,
@@ -1153,6 +1251,7 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
     swapEstimateUsdtToBtc,
     swapBtcToUsdt,
     swapUsdtToBtc,
+    liquidSwapResume,
     policyCheck,
     policyUpdate,
     receiptSave,
