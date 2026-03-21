@@ -215,10 +215,22 @@ app.get('/health', (_req, res) => {
   });
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`🖥️  Admin panel running at http://localhost:${PORT}`);
-});
+// Start server — find a free port if the default is taken
+function startServer(port: number, maxAttempts = 10) {
+  const server = app.listen(port, () => {
+    console.log(`🖥️  Admin panel running at http://localhost:${port}`);
+  });
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE' && maxAttempts > 1) {
+      console.log(`⚠️  Port ${port} in use, trying ${port + 1}...`);
+      startServer(port + 1, maxAttempts - 1);
+    } else {
+      console.error(`❌ Failed to start admin panel:`, err.message);
+      process.exit(1);
+    }
+  });
+}
+startServer(PORT);
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
