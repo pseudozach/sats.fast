@@ -16,11 +16,14 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
   const sparkGetBalance = tool(
     async () => {
       try {
+        console.log(`[Tool:spark_get_balance] fetching...`);
         const balance = await sparkAdapter.getBalance(userId, mnemonic);
         const btc = satsToBtc(balance);
         const usd = await satsToUsd(balance);
-        return `⚡ Lightning BTC (Spark)\nBalance: ${btc} BTC (${Number(balance).toLocaleString()} sats)\n≈ $${usd} USD`;
+        console.log(`[Tool:spark_get_balance] balance=${balance}, btc=${btc}, usd=${usd}`);
+        return `\u26a1 Lightning BTC (Spark)\nBalance: ${btc} BTC (${Number(balance).toLocaleString()} sats)\n\u2248 $${usd} USD`;
       } catch (err: any) {
+        console.error(`[Tool:spark_get_balance] ERROR:`, err);
         return `Error getting Spark balance: ${err.message}`;
       }
     },
@@ -66,9 +69,14 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
   const sparkCreateInvoice = tool(
     async ({ amountSats, memo }) => {
       try {
+        console.log(`[Tool:spark_create_invoice] amountSats=${amountSats}, memo="${memo}"`);
         const result = await sparkAdapter.createInvoice(userId, mnemonic, amountSats, memo);
-        return `Lightning invoice created:\n\n${result.invoice}\n\nAmount: ${amountSats.toLocaleString()} sats\nMemo: ${memo || 'none'}`;
+        // LightningReceiveRequest.invoice is an Invoice object with encodedInvoice
+        const bolt11 = result?.invoice?.encodedInvoice || result?.invoice || 'unknown';
+        console.log(`[Tool:spark_create_invoice] bolt11=${String(bolt11).substring(0, 50)}...`);
+        return `Lightning invoice created:\n\n${bolt11}\n\nAmount: ${amountSats.toLocaleString()} sats\nMemo: ${memo || 'none'}`;
       } catch (err: any) {
+        console.error(`[Tool:spark_create_invoice] ERROR:`, err);
         return `Error creating invoice: ${err.message}`;
       }
     },
@@ -85,9 +93,12 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
   const sparkFeeEstimate = tool(
     async ({ invoice }) => {
       try {
+        console.log(`[Tool:spark_fee_estimate] invoice=${invoice.substring(0, 40)}...`);
         const fee = await sparkAdapter.estimateFee(userId, mnemonic, invoice);
+        console.log(`[Tool:spark_fee_estimate] fee=${fee}`);
         return `Estimated Lightning routing fee: ${fee} sats`;
       } catch (err: any) {
+        console.error(`[Tool:spark_fee_estimate] ERROR:`, err);
         return `Error estimating fee: ${err.message}`;
       }
     },
@@ -103,7 +114,9 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
   const sparkPayInvoice = tool(
     async ({ invoice, maxFeeSats }) => {
       try {
+        console.log(`[Tool:spark_pay_invoice] invoice=${invoice.substring(0, 40)}..., maxFeeSats=${maxFeeSats}`);
         const result = await sparkAdapter.payInvoice(userId, mnemonic, invoice, maxFeeSats);
+        console.log(`[Tool:spark_pay_invoice] result:`, JSON.stringify(result, null, 2));
         return JSON.stringify({
           success: true,
           id: result.id,
@@ -111,6 +124,7 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
           fee: result.fee,
         });
       } catch (err: any) {
+        console.error(`[Tool:spark_pay_invoice] ERROR:`, err);
         return JSON.stringify({ success: false, error: err.message });
       }
     },
@@ -127,13 +141,16 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
   const sparkSend = tool(
     async ({ to, amountSats }) => {
       try {
+        console.log(`[Tool:spark_send] to=${to}, amountSats=${amountSats}`);
         const result = await sparkAdapter.send(userId, mnemonic, to, amountSats);
+        console.log(`[Tool:spark_send] result:`, JSON.stringify(result, null, 2));
         return JSON.stringify({
           success: true,
           hash: result.hash,
           fee: 0,
         });
       } catch (err: any) {
+        console.error(`[Tool:spark_send] ERROR:`, err);
         return JSON.stringify({ success: false, error: err.message });
       }
     },

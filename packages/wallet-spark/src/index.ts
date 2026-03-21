@@ -61,7 +61,9 @@ export class SparkAdapter {
    */
   async getAddress(userId: string, mnemonic: string): Promise<string> {
     const account = await this.getAccount(userId, mnemonic);
-    return account.getAddress();
+    const addr = await account.getAddress();
+    console.log(`[SparkAdapter] getAddress: ${addr}`);
+    return addr;
   }
 
   /**
@@ -69,7 +71,9 @@ export class SparkAdapter {
    */
   async getBalance(userId: string, mnemonic: string): Promise<bigint> {
     const account = await this.getAccount(userId, mnemonic);
-    return account.getBalance();
+    const balance = await account.getBalance();
+    console.log(`[SparkAdapter] getBalance: ${balance} sats`);
+    return balance;
   }
 
   /**
@@ -88,12 +92,15 @@ export class SparkAdapter {
     mnemonic: string,
     amountSats: number,
     memo: string = ''
-  ): Promise<InvoiceResult> {
+  ): Promise<any> {
     const account = await this.getAccount(userId, mnemonic);
-    return account.createLightningInvoice({
-      value: amountSats,
+    console.log(`[SparkAdapter] createInvoice: amountSats=${amountSats}, memo="${memo}"`);
+    const result = await account.createLightningInvoice({
+      amountSats,
       memo,
-    }) as Promise<InvoiceResult>;
+    });
+    console.log(`[SparkAdapter] createInvoice result:`, JSON.stringify(result, null, 2));
+    return result;
   }
 
   /**
@@ -104,12 +111,15 @@ export class SparkAdapter {
     mnemonic: string,
     invoice: string,
     maxFeeSats: number = 1000
-  ): Promise<PayResult> {
+  ): Promise<any> {
     const account = await this.getAccount(userId, mnemonic);
-    return account.payLightningInvoice({
+    console.log(`[SparkAdapter] payInvoice: invoice=${invoice.substring(0, 30)}..., maxFeeSats=${maxFeeSats}`);
+    const result = await account.payLightningInvoice({
       invoice,
       maxFeeSats,
-    }) as Promise<PayResult>;
+    });
+    console.log(`[SparkAdapter] payInvoice result:`, JSON.stringify(result, null, 2));
+    return result;
   }
 
   /**
@@ -121,7 +131,10 @@ export class SparkAdapter {
     invoice: string
   ): Promise<number> {
     const account = await this.getAccount(userId, mnemonic);
-    return account.getLightningSendFeeEstimate({ invoice });
+    console.log(`[SparkAdapter] estimateFee: invoice=${invoice.substring(0, 30)}...`);
+    const fee = await account.quotePayLightningInvoice({ encodedInvoice: invoice });
+    console.log(`[SparkAdapter] estimateFee result: ${fee}`);
+    return Number(fee);
   }
 
   /**
@@ -134,10 +147,13 @@ export class SparkAdapter {
     amountSats: number
   ): Promise<SendResult> {
     const account = await this.getAccount(userId, mnemonic);
-    return account.sendTransaction({
+    console.log(`[SparkAdapter] send: to=${to}, amountSats=${amountSats}`);
+    const result = await account.sendTransaction({
       to,
       value: amountSats,
-    }) as Promise<SendResult>;
+    }) as SendResult;
+    console.log(`[SparkAdapter] send result:`, JSON.stringify(result, null, 2));
+    return result;
   }
 
   /**
@@ -150,7 +166,10 @@ export class SparkAdapter {
     amountSats: number
   ): Promise<unknown> {
     const account = await this.getAccount(userId, mnemonic);
-    return account.withdraw({ to, value: amountSats });
+    console.log(`[SparkAdapter] withdraw: to=${to}, amountSats=${amountSats}`);
+    const result = await account.withdraw({ onchainAddress: to, amountSats });
+    console.log(`[SparkAdapter] withdraw result:`, JSON.stringify(result, null, 2));
+    return result;
   }
 
   /**
