@@ -1173,16 +1173,31 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
         }
 
         const btcAmount = lbtcBalance / 1e8;
+        const estimatedUsdValue = btcAmount * btcPrice;
+
+        // If the L-BTC value is below $1, it's too small to swap (SideSwap minimums)
+        // and is actually useful as a fee reserve for future swaps.
+        if (estimatedUsdValue < 1.0) {
+          console.log(`[Tool:liquid_swap_resume] lbtcBalance=${lbtcBalance} ≈ $${estimatedUsdValue.toFixed(2)} — below $1 threshold, keeping as fee reserve`);
+          return JSON.stringify({
+            success: true,
+            skipped: true,
+            lbtcBalance,
+            estimatedUsdValue: estimatedUsdValue.toFixed(2),
+            message: `Small L-BTC balance (${lbtcBalance.toLocaleString()} sats ≈ $${estimatedUsdValue.toFixed(2)}) is kept as a fee reserve for future conversions. No swap needed.`,
+          });
+        }
+
         // Use 85% as initial estimate — swapLbtcToUsdt will auto-retry with smaller
         // amounts if "not enough funds" (Liquid tx fees eat ~300-500 sats flat)
-        const estimatedUsdt = btcAmount * btcPrice * 0.85;
+        const estimatedUsdt = estimatedUsdValue * 0.85;
         const usdtAmount = Math.floor(estimatedUsdt * 100) / 100;
         console.log(`[Tool:liquid_swap_resume] lbtcBalance=${lbtcBalance}, btcPrice=${btcPrice}, initialEstimate=${usdtAmount}`);
 
         if (usdtAmount < 0.01) {
           return JSON.stringify({
             success: false,
-            error: `L-BTC balance too small to swap: ${lbtcBalance} sats ≈ $${(btcAmount * btcPrice).toFixed(2)}.`,
+            error: `L-BTC balance too small to swap: ${lbtcBalance} sats ≈ $${estimatedUsdValue.toFixed(2)}.`,
           });
         }
 
