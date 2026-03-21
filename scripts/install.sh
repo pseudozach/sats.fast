@@ -3,13 +3,20 @@ set -euo pipefail
 
 # ─────────────────────────────────────────────────────────
 #  sats.fast installer
-#  Target: Ubuntu 22+, Debian 12+, Amazon Linux 2023, RHEL/Fedora
+#  Target: macOS (Homebrew), Ubuntu 22+, Debian 12+, Amazon Linux 2023, RHEL/Fedora
 #  Usage:  curl -sSL https://raw.githubusercontent.com/pseudozach/sats.fast/main/scripts/install.sh | bash
 # ─────────────────────────────────────────────────────────
 
 main() {
 
-INSTALL_DIR="/opt/sats-fast"
+# ── Detect platform first (sets INSTALL_DIR, IS_MACOS) ──
+IS_MACOS=0
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  IS_MACOS=1
+  INSTALL_DIR="$HOME/sats-fast-agent"
+else
+  INSTALL_DIR="/opt/sats-fast"
+fi
 DATA_DIR="$INSTALL_DIR/data"
 
 echo ""
@@ -33,6 +40,17 @@ fi
 # ── Detect OS ─────────────────────────────────────────
 echo "🔍 Detecting operating system..."
 detect_os() {
+  if [ "$IS_MACOS" = "1" ]; then
+    PKG_MANAGER="brew"
+    if ! command -v brew &>/dev/null; then
+      echo "  ❌ Homebrew is required but not installed."
+      echo "  Install it first: https://brew.sh"
+      exit 1
+    fi
+    echo "  OS: macOS $(sw_vers -productVersion) (using brew)"
+    return
+  fi
+
   if [ -f /etc/os-release ]; then
     . /etc/os-release
     OS_ID="${ID:-unknown}"
@@ -57,7 +75,7 @@ detect_os() {
           elif command -v yum &>/dev/null; then
             PKG_MANAGER="yum"
           else
-            echo "  ❌ No supported package manager found (apt/dnf/yum)."
+            echo "  ❌ No supported package manager found (apt/dnf/yum/brew)."
             exit 1
           fi
           ;;
@@ -71,6 +89,15 @@ detect_os
 
 # ── 1. System packages ────────────────────────────────
 echo ""
+if [ "$IS_MACOS" = "1" ]; then
+  if command -v git &>/dev/null && command -v sqlite3 &>/dev/null; then
+    echo "📦 [1/5] System packages — already installed ✅"
+  else
+    echo "📦 [1/5] Installing system packages..."
+    brew install git sqlite openssl 2>/dev/null || true
+    echo "   ✅ System packages installed"
+  fi
+else
 if command -v git &>/dev/null && command -v nginx &>/dev/null && command -v gcc &>/dev/null; then
   echo "📦 [1/5] System packages — already installed ✅"
 else
@@ -90,12 +117,32 @@ else
   esac
   echo "   ✅ System packages installed"
 fi
+fi
 
 # ── 2. Node.js 22 ────────────────────────────────────
+# Source nvm if available (needed for nvm-managed node to be in PATH)
+if [ "$IS_MACOS" = "1" ]; then
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+fi
 if command -v node &>/dev/null && [[ $(node -v | cut -d. -f1 | tr -d 'v') -ge 22 ]]; then
   echo "📦 [2/5] Node.js $(node -v) — already installed ✅"
 else
   echo "📦 [2/5] Installing Node.js 22..."
+  if [ "$IS_MACOS" = "1" ]; then
+    # Prefer nvm if available
+    export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+    [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+    if command -v nvm &>/dev/null; then
+      nvm install 22 > /dev/null 2>&1
+      nvm use 22 > /dev/null 2>&1
+    else
+      brew install node@22 2>/dev/null || brew upgrade node@22 2>/dev/null || true
+      if ! command -v node &>/dev/null || [[ $(node -v | cut -d. -f1 | tr -d 'v') -lt 22 ]]; then
+        brew link --overwrite node@22 2>/dev/null || true
+      fi
+    fi
+  else
   case "$PKG_MANAGER" in
     apt)
       curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - > /dev/null 2>&1
@@ -106,24 +153,31 @@ else
       sudo $PKG_MANAGER install -q -y nodejs > /dev/null 2>&1
       ;;
   esac
+  fi
   echo "   ✅ Node.js $(node -v)"
 fi
 
-# ── 3. pnpm + pm2 ─────────────────────────────────────
-echo "📦 [3/5] Checking pnpm + pm2..."
+# ── 3. pnpm (+ pm2 on Linux) ───────────────────────────
+echo "📦 [3/5] Checking pnpm..."
 if command -v pnpm &>/dev/null; then
   echo "   pnpm $(pnpm -v) ✅"
 else
   echo "   Installing pnpm..."
-  sudo npm install -g pnpm > /dev/null 2>&1
+  if [ "$IS_MACOS" = "1" ]; then
+    npm install -g pnpm > /dev/null 2>&1
+  else
+    sudo npm install -g pnpm > /dev/null 2>&1
+  fi
   echo "   pnpm $(pnpm -v) ✅"
 fi
-if command -v pm2 &>/dev/null; then
-  echo "   pm2 $(pm2 -v 2>/dev/null) ✅"
-else
-  echo "   Installing pm2..."
-  sudo npm install -g pm2 > /dev/null 2>&1
-  echo "   pm2 $(pm2 -v 2>/dev/null) ✅"
+if [ "$IS_MACOS" = "0" ]; then
+  if command -v pm2 &>/dev/null; then
+    echo "   pm2 $(pm2 -v 2>/dev/null) ✅"
+  else
+    echo "   Installing pm2..."
+    sudo npm install -g pm2 > /dev/null 2>&1
+    echo "   pm2 $(pm2 -v 2>/dev/null) ✅"
+  fi
 fi
 
 # ── 4. Clone or update repo ───────────────────────────
@@ -134,10 +188,18 @@ if [ -d "$INSTALL_DIR/.git" ]; then
   [ -f .env ] && cp .env /tmp/sats-fast-env-backup
   [ -d data ] && cp -r data /tmp/sats-fast-data-backup
   cd /
-  sudo rm -rf "$INSTALL_DIR"
+  rm -rf "$INSTALL_DIR"
+elif [ -d "$INSTALL_DIR" ]; then
+  echo "  ❌ $INSTALL_DIR already exists but is not a sats.fast install."
+  echo "     Remove it manually or choose a different location."
+  exit 1
 fi
-sudo mkdir -p "$INSTALL_DIR"
-sudo chown "$USER:$USER" "$INSTALL_DIR"
+if [ "$IS_MACOS" = "1" ]; then
+  : # git clone will create the directory
+else
+  sudo mkdir -p "$INSTALL_DIR"
+  sudo chown "$USER:$USER" "$INSTALL_DIR"
+fi
 git clone -q https://github.com/pseudozach/sats.fast.git "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 # Restore .env and data/ if they existed
@@ -318,8 +380,7 @@ else
   echo "   ⚠️  Migration may have failed — check output above"
 fi
 
-# ── 9. pm2 ─────────────────────────────────────────────
-echo "🚀 Starting services with pm2..."
+# ── 9. Start services ──────────────────────────────────
 cd "$INSTALL_DIR"
 
 # Verify dist files exist
@@ -329,6 +390,38 @@ fi
 if [ ! -f "$INSTALL_DIR/apps/admin/dist/index.js" ]; then
   echo "   ❌ apps/admin/dist/index.js not found — admin build failed"
 fi
+
+if [ "$IS_MACOS" = "1" ]; then
+  echo "🚀 Starting sats.fast..."
+  echo ""
+  echo "  ─────────────────────────────────────"
+  echo "  ✅ sats.fast is installed!"
+  echo ""
+  echo "  Install dir: $INSTALL_DIR"
+  echo "  Admin panel: http://localhost:3000"
+  echo ""
+  echo "  To start the bot:"
+  echo "    cd $INSTALL_DIR && node apps/bot/dist/index.js"
+  echo ""
+  echo "  To start the admin panel (separate terminal):"
+  echo "    cd $INSTALL_DIR && node apps/admin/dist/index.js"
+  echo ""
+  echo "  To stop: Ctrl+C"
+  echo ""
+  echo "  ⚠️  Back up your .env file — it contains"
+  echo "     your encryption key and credentials."
+  echo "  ─────────────────────────────────────"
+  echo ""
+  echo "🤖 Starting Telegram bot now..."
+  echo "   (Press Ctrl+C to stop)"
+  echo ""
+  cd "$INSTALL_DIR"
+  export $(grep -v '^#' .env | xargs)
+  export START_SERVER=true
+  node apps/bot/dist/index.js
+else
+
+echo "🚀 Starting services with pm2..."
 
 set +eo pipefail
 pm2 delete sats-fast-bot 2>/dev/null || true
@@ -403,6 +496,8 @@ echo "  ⚠️  Back up your .env file — it contains"
 echo "     your encryption key and credentials."
 echo "  ─────────────────────────────────────"
 echo ""
+
+fi # end macOS/Linux branch
 
 } # end main
 
