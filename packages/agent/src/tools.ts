@@ -1,10 +1,10 @@
 import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
 import { sparkAdapter } from '@sats-fast/wallet-spark';
-import { liquidAdapter } from '@sats-fast/wallet-liquid';
+import { liquidAdapter, LBTC_ASSET_ID, USDT_ASSET_ID } from '@sats-fast/wallet-liquid';
 import { checkPolicy, updatePolicyRule, getPolicyRules } from '@sats-fast/policy';
 import { saveReceipt, getReceipts } from '@sats-fast/receipts';
-import { satsToBtc, satsToUsd } from '@sats-fast/shared';
+import { satsToBtc, satsToUsd, getBtcPrice } from '@sats-fast/shared';
 
 /**
  * Factory that creates all agent tools bound to a specific user.
@@ -308,6 +308,216 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
     }
   );
 
+  // ── Cross-asset swap tools ───────────────────────────
+
+  const swapBtcToUsdt = tool(
+    async ({ amountSats }) => {
+      try {
+        console.log(`[Tool:swap_btc_to_usdt] amountSats=${amountSats}`);
+
+        // Step 1: Check Spark BTC balance
+        const sparkBalance = await sparkAdapter.getBalance(userId, mnemonic);
+        console.log(`[Tool:swap_btc_to_usdt] sparkBalance=${sparkBalance}`);
+        if (Number(sparkBalance) < amountSats) {
+          return JSON.stringify({
+            success: false,
+            error: `Insufficient Spark balance: ${Number(sparkBalance).toLocaleString()} sats available, need ${amountSats.toLocaleString()} sats`,
+          });
+        }
+
+        // Step 2: Create a Lightning invoice on the Liquid side to receive L-BTC
+        let invoice: string;
+        let receiveFee: number;
+        try {
+          const rcv = await liquidAdapter.createLightningInvoice(userId, mnemonic, amountSats);
+          invoice = rcv.invoice;
+          receiveFee = rcv.feesSat;
+          console.log(`[Tool:swap_btc_to_usdt] Lightning invoice created, receiveFee=${receiveFee}`);
+        } catch (err: any) {
+          return JSON.stringify({
+            success: false,
+            error: `Cannot create Lightning invoice on Liquid side: ${err.message}`,
+          });
+        }
+
+        // Step 3: Pay the invoice from Spark (moves BTC → Liquid as L-BTC)
+        try {
+          const payResult = await sparkAdapter.payInvoice(userId, mnemonic, invoice, 1000);
+          console.log(`[Tool:swap_btc_to_usdt] Spark payment sent, status=${payResult?.status}`);
+        } catch (err: any) {
+          return JSON.stringify({
+            success: false,
+            error: `Failed to pay Lightning invoice from Spark: ${err.message}`,
+          });
+        }
+
+        // Step 4: Wait for L-BTC to arrive in Liquid wallet
+        const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+        let lbtcBalance = 0;
+        for (let i = 0; i < 30; i++) {
+          await sleep(2000);
+          lbtcBalance = await liquidAdapter.getLbtcBalance(userId, mnemonic);
+          console.log(`[Tool:swap_btc_to_usdt] poll ${i + 1}/30: lbtcBalance=${lbtcBalance}`);
+          if (lbtcBalance > 0) break;
+        }
+
+        if (lbtcBalance <= 0) {
+          return JSON.stringify({
+            success: false,
+            error: 'BTC was sent to Liquid wallet but L-BTC has not arrived yet. This can take a few minutes. Please try checking your balance again shortly.',
+          });
+        }
+
+        // Step 5: Estimate USDT amount from the L-BTC balance
+        const btcPrice = await getBtcPrice();
+        if (btcPrice <= 0) {
+          return JSON.stringify({
+            success: false,
+            error: 'Could not fetch BTC/USD price for swap estimation.',
+          });
+        }
+        const btcAmount = lbtcBalance / 1e8;
+        // Use 95% of estimated USDT to account for swap slippage and fees
+        const estimatedUsdt = btcAmount * btcPrice * 0.95;
+        const usdtAmount = Math.floor(estimatedUsdt * 100) / 100; // round down to 2 decimals
+        console.log(`[Tool:swap_btc_to_usdt] btcPrice=${btcPrice}, estimatedUsdt=${estimatedUsdt}, usdtAmount=${usdtAmount}`);
+
+        if (usdtAmount < 0.01) {
+          return JSON.stringify({
+            success: false,
+            error: `L-BTC amount too small to swap (${lbtcBalance} sats ≈ $${(btcAmount * btcPrice).toFixed(2)}).`,
+          });
+        }
+
+        // Step 6: Swap L-BTC → USDT via self-payment
+        try {
+          const swapResult = await liquidAdapter.swapLbtcToUsdt(userId, mnemonic, usdtAmount);
+          console.log(`[Tool:swap_btc_to_usdt] swap done, feesSat=${swapResult.feesSat}`);
+
+          return JSON.stringify({
+            success: true,
+            amountSatsSent: amountSats,
+            usdtReceived: usdtAmount,
+            lightningFee: receiveFee,
+            swapFee: swapResult.feesSat,
+            message: `Converted ${amountSats.toLocaleString()} sats → ~${usdtAmount.toFixed(2)} USDT`,
+          });
+        } catch (err: any) {
+          console.error(`[Tool:swap_btc_to_usdt] swap error:`, err);
+          return JSON.stringify({
+            success: false,
+            error: `L-BTC arrived (${lbtcBalance} sats) but swap to USDT failed: ${err.message}. The L-BTC is safe in your Liquid wallet.`,
+          });
+        }
+      } catch (err: any) {
+        console.error(`[Tool:swap_btc_to_usdt] ERROR:`, err);
+        return JSON.stringify({ success: false, error: err.message });
+      }
+    },
+    {
+      name: 'swap_btc_to_usdt',
+      description:
+        'Convert BTC (from Spark Lightning wallet) to USDT (on Liquid). ' +
+        'Moves BTC from Spark → Liquid via Lightning, then swaps L-BTC → USDT. ' +
+        'This is a multi-step process that takes 10-60 seconds. ' +
+        'MUST call policy_check first with actionType "swap".',
+      schema: z.object({
+        amountSats: z.number().positive().describe('Amount of BTC to convert, in satoshis'),
+      }),
+    }
+  );
+
+  const swapUsdtToBtc = tool(
+    async ({ usdtAmount }) => {
+      try {
+        console.log(`[Tool:swap_usdt_to_btc] usdtAmount=${usdtAmount}`);
+
+        // Step 1: Check USDT balance
+        const bal = await liquidAdapter.getBalance(userId, mnemonic);
+        console.log(`[Tool:swap_usdt_to_btc] usdtBalance=${bal.usdtBalance}`);
+        if (bal.usdtBalance < usdtAmount) {
+          return JSON.stringify({
+            success: false,
+            error: `Insufficient USDT balance: ${bal.usdtBalance.toFixed(2)} USDT available, need ${usdtAmount.toFixed(2)} USDT`,
+          });
+        }
+
+        // Step 2: Estimate L-BTC amount from USDT
+        const btcPrice = await getBtcPrice();
+        if (btcPrice <= 0) {
+          return JSON.stringify({
+            success: false,
+            error: 'Could not fetch BTC/USD price for swap estimation.',
+          });
+        }
+        // Use 95% to account for slippage
+        const estimatedBtc = (usdtAmount / btcPrice) * 0.95;
+        const lbtcAmountSat = Math.floor(estimatedBtc * 1e8);
+        console.log(`[Tool:swap_usdt_to_btc] btcPrice=${btcPrice}, estimatedBtc=${estimatedBtc}, lbtcAmountSat=${lbtcAmountSat}`);
+
+        // Step 3: Swap USDT → L-BTC via self-payment
+        let swapFee = 0;
+        try {
+          const swapResult = await liquidAdapter.swapUsdtToLbtc(userId, mnemonic, lbtcAmountSat);
+          swapFee = swapResult.feesSat;
+          console.log(`[Tool:swap_usdt_to_btc] swap done, feesSat=${swapFee}`);
+        } catch (err: any) {
+          return JSON.stringify({
+            success: false,
+            error: `USDT → L-BTC swap failed: ${err.message}`,
+          });
+        }
+
+        // Step 4: Create Lightning invoice on Spark to receive the BTC
+        let sparkInvoice: string;
+        try {
+          const invoiceResult = await sparkAdapter.createInvoice(userId, mnemonic, lbtcAmountSat, 'USDT→BTC swap');
+          sparkInvoice = invoiceResult?.invoice?.encodedInvoice || invoiceResult?.invoice;
+          console.log(`[Tool:swap_usdt_to_btc] Spark invoice created`);
+        } catch (err: any) {
+          return JSON.stringify({
+            success: false,
+            error: `L-BTC swap succeeded but failed to create Spark invoice: ${err.message}. L-BTC is in your Liquid wallet.`,
+          });
+        }
+
+        // Step 5: Pay the Spark invoice from Liquid L-BTC
+        try {
+          const payResult = await liquidAdapter.payLightningInvoice(userId, mnemonic, sparkInvoice);
+          console.log(`[Tool:swap_usdt_to_btc] Liquid→Spark Lightning payment sent, feesSat=${payResult.feesSat}`);
+
+          return JSON.stringify({
+            success: true,
+            usdtSent: usdtAmount,
+            btcReceivedSats: lbtcAmountSat,
+            swapFee,
+            lightningFee: payResult.feesSat,
+            message: `Converted ${usdtAmount.toFixed(2)} USDT → ~${lbtcAmountSat.toLocaleString()} sats`,
+          });
+        } catch (err: any) {
+          return JSON.stringify({
+            success: false,
+            error: `USDT→L-BTC swap succeeded but Lightning payment to Spark failed: ${err.message}. BTC is in your Liquid wallet as L-BTC.`,
+          });
+        }
+      } catch (err: any) {
+        console.error(`[Tool:swap_usdt_to_btc] ERROR:`, err);
+        return JSON.stringify({ success: false, error: err.message });
+      }
+    },
+    {
+      name: 'swap_usdt_to_btc',
+      description:
+        'Convert USDT (on Liquid) to BTC (on Spark Lightning wallet). ' +
+        'Swaps USDT → L-BTC on Liquid, then sends L-BTC to Spark via Lightning. ' +
+        'This is a multi-step process that takes 10-60 seconds. ' +
+        'MUST call policy_check first with actionType "swap".',
+      schema: z.object({
+        usdtAmount: z.number().positive().describe('Amount of USDT to convert'),
+      }),
+    }
+  );
+
   // ── Policy tools ─────────────────────────────────────
 
   const policyCheck = tool(
@@ -425,6 +635,8 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
     liquidSendExecute,
     liquidReceivePrepare,
     liquidReceiveExecute,
+    swapBtcToUsdt,
+    swapUsdtToBtc,
     policyCheck,
     policyUpdate,
     receiptSave,

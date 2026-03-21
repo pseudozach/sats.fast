@@ -12,6 +12,12 @@ const { connect, defaultConfig } = breezSdkLiquid;
 export const USDT_ASSET_ID =
   'ce091c998b83c78bb71a632313ba3760f1763d9cfcffae02258ffa9865a37bd2';
 
+/**
+ * L-BTC asset ID on Liquid mainnet.
+ */
+export const LBTC_ASSET_ID =
+  '6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d';
+
 // Types for Breez SDK responses
 interface BreezSdk {
   getInfo(): Promise<BreezInfo>;
@@ -19,6 +25,9 @@ interface BreezSdk {
   sendPayment(req: SendRequest): Promise<SendResponse>;
   prepareReceivePayment(req: PrepareReceiveRequest): Promise<PrepareReceiveResponse>;
   receivePayment(req: ReceiveRequest): Promise<ReceiveResponse>;
+  fetchFiatRates(): Promise<Rate[]>;
+  fetchLightningLimits(): Promise<LightningLimits>;
+  sync(): Promise<void>;
   disconnect(): Promise<void>;
 }
 
@@ -27,26 +36,39 @@ interface BreezInfo {
     balanceSat: number;
     pendingSendSat: number;
     pendingReceiveSat: number;
+    assetBalances: AssetBalance[];
   };
-  assetBalances?: AssetBalance[];
 }
 
 interface AssetBalance {
   assetId: string;
-  balanceAmount: number;
+  balanceSat: number;
+  balance?: number;
+  name?: string;
+  ticker?: string;
+}
+
+interface Rate {
+  coin: string;
+  value: number;
 }
 
 interface PrepareSendRequest {
   destination: string;
-  amount: {
-    type: string;
-    assetId: string;
-    receiverAmount: number;
-  };
+  amount?: PayAmount;
+  disableMrh?: boolean;
+  paymentTimeoutSec?: number;
 }
 
+type PayAmount =
+  | { type: 'bitcoin'; receiverAmountSat: number }
+  | { type: 'asset'; toAsset: string; receiverAmount: number; estimateAssetFees?: boolean; fromAsset?: string }
+  | { type: 'drain' };
+
 interface PrepareSendResponse {
-  feesSat: number;
+  feesSat?: number;
+  estimatedAssetFees?: number;
+  exchangeAmountSat?: number;
   [key: string]: unknown;
 }
 
@@ -59,17 +81,26 @@ interface SendResponse {
 }
 
 interface PrepareReceiveRequest {
-  paymentMethod: string;
-  amount?: {
-    type: string;
-    assetId: string;
-    payerAmount?: number;
-  };
+  paymentMethod: 'bolt11Invoice' | 'bolt12Offer' | 'bitcoinAddress' | 'liquidAddress';
+  amount?: ReceiveAmount;
 }
 
+type ReceiveAmount =
+  | { type: 'bitcoin'; payerAmountSat: number }
+  | { type: 'asset'; assetId: string; payerAmount?: number };
+
 interface PrepareReceiveResponse {
+  paymentMethod: string;
   feesSat: number;
+  amount?: ReceiveAmount;
+  minPayerAmountSat?: number;
+  maxPayerAmountSat?: number;
   [key: string]: unknown;
+}
+
+interface LightningLimits {
+  send: { minSat: number; maxSat: number };
+  receive: { minSat: number; maxSat: number };
 }
 
 interface ReceiveRequest {
@@ -138,13 +169,12 @@ export class LiquidAdapter {
     const info = await sdk.getInfo();
 
     let usdtBalance = 0;
-    if (info.assetBalances) {
-      const usdtAsset = info.assetBalances.find(
-        (b: AssetBalance) => b.assetId === USDT_ASSET_ID
-      );
-      if (usdtAsset) {
-        usdtBalance = usdtAsset.balanceAmount;
-      }
+    const assetBalances = info.walletInfo?.assetBalances || [];
+    const usdtAsset = assetBalances.find(
+      (b: AssetBalance) => b.assetId === USDT_ASSET_ID
+    );
+    if (usdtAsset) {
+      usdtBalance = usdtAsset.balance ?? usdtAsset.balanceSat / 1e8;
     }
 
     return {
@@ -212,14 +242,14 @@ export class LiquidAdapter {
       destination,
       amount: {
         type: 'asset',
-        assetId: USDT_ASSET_ID,
+        toAsset: USDT_ASSET_ID,
         receiverAmount: amount,
       },
     });
 
     return {
       prepareResponse,
-      feesSat: prepareResponse.feesSat,
+      feesSat: prepareResponse.feesSat ?? 0,
     };
   }
 
@@ -234,6 +264,187 @@ export class LiquidAdapter {
     const sdk = await this.getSdk(userId, mnemonic);
     const resp = await sdk.sendPayment({ prepareResponse });
     return resp.payment;
+  }
+
+  // ── Cross-asset swap methods ─────────────────────────
+
+  /**
+   * Create a Lightning (bolt11) invoice to receive BTC into the Liquid wallet as L-BTC.
+   * This is used to move BTC from Spark → Liquid before swapping to USDT.
+   */
+  async createLightningInvoice(
+    userId: string,
+    mnemonic: string,
+    amountSats: number
+  ): Promise<{ invoice: string; feesSat: number; minSat: number; maxSat: number }> {
+    const sdk = await this.getSdk(userId, mnemonic);
+    console.log(`[LiquidAdapter:createLightningInvoice] amountSats=${amountSats}`);
+
+    // Check Lightning receive limits
+    const limits = await sdk.fetchLightningLimits();
+    console.log(`[LiquidAdapter:createLightningInvoice] limits: min=${limits.receive.minSat}, max=${limits.receive.maxSat}`);
+
+    if (amountSats < limits.receive.minSat || amountSats > limits.receive.maxSat) {
+      throw new Error(
+        `Amount ${amountSats} sats outside Lightning receive limits (${limits.receive.minSat}–${limits.receive.maxSat} sats)`
+      );
+    }
+
+    const prepareResponse = await sdk.prepareReceivePayment({
+      paymentMethod: 'bolt11Invoice',
+      amount: { type: 'bitcoin', payerAmountSat: amountSats },
+    });
+
+    console.log(`[LiquidAdapter:createLightningInvoice] feesSat=${prepareResponse.feesSat}`);
+
+    const resp = await sdk.receivePayment({ prepareResponse });
+
+    return {
+      invoice: resp.destination,
+      feesSat: prepareResponse.feesSat,
+      minSat: limits.receive.minSat,
+      maxSat: limits.receive.maxSat,
+    };
+  }
+
+  /**
+   * Get the L-BTC balance specifically.
+   */
+  async getLbtcBalance(userId: string, mnemonic: string): Promise<number> {
+    const sdk = await this.getSdk(userId, mnemonic);
+    const info = await sdk.getInfo();
+    return info.walletInfo.balanceSat;
+  }
+
+  /**
+   * Get fiat exchange rates from the Breez SDK (includes BTC/USD).
+   */
+  async getFiatRates(userId: string, mnemonic: string): Promise<Rate[]> {
+    const sdk = await this.getSdk(userId, mnemonic);
+    return sdk.fetchFiatRates();
+  }
+
+  /**
+   * Swap L-BTC → USDT via self-payment on Liquid network.
+   * Uses the Breez SDK's cross-asset payment feature (SideSwap under the hood).
+   *
+   * @param usdtAmount - The desired amount of USDT to receive.
+   */
+  async swapLbtcToUsdt(
+    userId: string,
+    mnemonic: string,
+    usdtAmount: number
+  ): Promise<{ feesSat: number; estimatedAssetFees?: number; payment: unknown }> {
+    const sdk = await this.getSdk(userId, mnemonic);
+    console.log(`[LiquidAdapter:swapLbtcToUsdt] usdtAmount=${usdtAmount}`);
+
+    // Sync wallet state first
+    await sdk.sync();
+
+    // 1. Create a self-receive Liquid address (amountless)
+    const prepRcv = await sdk.prepareReceivePayment({
+      paymentMethod: 'liquidAddress',
+    });
+    const rcvRes = await sdk.receivePayment({ prepareResponse: prepRcv });
+    const selfAddress = rcvRes.destination;
+    console.log(`[LiquidAdapter:swapLbtcToUsdt] selfAddress=${selfAddress.substring(0, 30)}...`);
+
+    // 2. Prepare send to self: L-BTC → USDT
+    const prepSend = await sdk.prepareSendPayment({
+      destination: selfAddress,
+      amount: {
+        type: 'asset',
+        toAsset: USDT_ASSET_ID,
+        receiverAmount: usdtAmount,
+        fromAsset: LBTC_ASSET_ID,
+      },
+    });
+    console.log(`[LiquidAdapter:swapLbtcToUsdt] feesSat=${prepSend.feesSat}, estimatedAssetFees=${prepSend.estimatedAssetFees}`);
+
+    // 3. Execute the swap
+    const sendRes = await sdk.sendPayment({ prepareResponse: prepSend });
+    console.log(`[LiquidAdapter:swapLbtcToUsdt] swap complete`);
+
+    return {
+      feesSat: prepSend.feesSat ?? 0,
+      estimatedAssetFees: prepSend.estimatedAssetFees,
+      payment: sendRes.payment,
+    };
+  }
+
+  /**
+   * Swap USDT → L-BTC via self-payment on Liquid network.
+   *
+   * @param lbtcAmountSat - The desired amount of L-BTC to receive in sats.
+   */
+  async swapUsdtToLbtc(
+    userId: string,
+    mnemonic: string,
+    lbtcAmountSat: number
+  ): Promise<{ feesSat: number; estimatedAssetFees?: number; payment: unknown }> {
+    const sdk = await this.getSdk(userId, mnemonic);
+    console.log(`[LiquidAdapter:swapUsdtToLbtc] lbtcAmountSat=${lbtcAmountSat}`);
+
+    await sdk.sync();
+
+    // 1. Create self-receive Liquid address
+    const prepRcv = await sdk.prepareReceivePayment({
+      paymentMethod: 'liquidAddress',
+    });
+    const rcvRes = await sdk.receivePayment({ prepareResponse: prepRcv });
+    const selfAddress = rcvRes.destination;
+    console.log(`[LiquidAdapter:swapUsdtToLbtc] selfAddress=${selfAddress.substring(0, 30)}...`);
+
+    // 2. Prepare send to self: USDT → L-BTC
+    //    receiverAmountSat is in the "toAsset" denomination.
+    //    For L-BTC, the SDK uses sats internally but the field is receiverAmount (BTC float).
+    const lbtcAmountBtc = lbtcAmountSat / 1e8;
+    const prepSend = await sdk.prepareSendPayment({
+      destination: selfAddress,
+      amount: {
+        type: 'asset',
+        toAsset: LBTC_ASSET_ID,
+        receiverAmount: lbtcAmountBtc,
+        fromAsset: USDT_ASSET_ID,
+      },
+    });
+    console.log(`[LiquidAdapter:swapUsdtToLbtc] feesSat=${prepSend.feesSat}, estimatedAssetFees=${prepSend.estimatedAssetFees}`);
+
+    // 3. Execute
+    const sendRes = await sdk.sendPayment({ prepareResponse: prepSend });
+    console.log(`[LiquidAdapter:swapUsdtToLbtc] swap complete`);
+
+    return {
+      feesSat: prepSend.feesSat ?? 0,
+      estimatedAssetFees: prepSend.estimatedAssetFees,
+      payment: sendRes.payment,
+    };
+  }
+
+  /**
+   * Pay a Lightning invoice from the Liquid wallet's L-BTC balance.
+   * Used to move L-BTC from Liquid → Spark (by paying a Spark-generated invoice).
+   */
+  async payLightningInvoice(
+    userId: string,
+    mnemonic: string,
+    bolt11: string
+  ): Promise<{ feesSat: number; payment: unknown }> {
+    const sdk = await this.getSdk(userId, mnemonic);
+    console.log(`[LiquidAdapter:payLightningInvoice] bolt11=${bolt11.substring(0, 40)}...`);
+
+    const prepareResponse = await sdk.prepareSendPayment({
+      destination: bolt11,
+    });
+    console.log(`[LiquidAdapter:payLightningInvoice] feesSat=${prepareResponse.feesSat}`);
+
+    const sendRes = await sdk.sendPayment({ prepareResponse });
+    console.log(`[LiquidAdapter:payLightningInvoice] payment sent`);
+
+    return {
+      feesSat: prepareResponse.feesSat ?? 0,
+      payment: sendRes.payment,
+    };
   }
 
   /**
