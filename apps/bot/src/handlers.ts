@@ -14,6 +14,7 @@ import {
   createPendingApproval,
   resolvePendingApproval,
 } from './user-service';
+import { qrInputFile } from './qr';
 
 /**
  * Send a message with Markdown, falling back to plain text if Telegram
@@ -150,13 +151,14 @@ export function registerHandlers(bot: Bot) {
 
     try {
       const addr = await sparkAdapter.getDepositAddress(tgId, mnemonic);
-      await ctx.reply(
-        '⚡ *Bitcoin Deposit Address*\n\n' +
-          `\`${addr}\`\n\n` +
+      const { source } = await qrInputFile(addr);
+      await ctx.replyWithPhoto(source, {
+        caption:
+          '⚡ Bitcoin Deposit Address\n\n' +
+          `${addr}\n\n` +
           'Send BTC on-chain to this single-use address.\n' +
           'It will appear in your Lightning balance after confirmations.',
-        { parse_mode: 'Markdown' }
-      );
+      });
     } catch (err: any) {
       await ctx.reply(`❌ Error: ${err.message}`);
     }
@@ -184,12 +186,15 @@ export function registerHandlers(bot: Bot) {
       const result = await sparkAdapter.createInvoice(tgId, mnemonic, amount, memo);
       // LightningReceiveRequest.invoice is an Invoice object with encodedInvoice
       const bolt11 = result?.invoice?.encodedInvoice || result?.invoice || 'unknown';
-      await safeSend(ctx,
-        '⚡ *Lightning Invoice*\n\n' +
-          `\`${bolt11}\`\n\n` +
-          `Amount: ${amount.toLocaleString()} sats\n` +
-          (memo ? `Memo: ${memo}` : '')
-      );
+      const { source } = await qrInputFile(String(bolt11));
+      await ctx.replyWithPhoto(source, {
+        caption:
+          `⚡ Lightning Invoice\n\n` +
+          `${bolt11}\n\n` +
+          `Amount: ${amount.toLocaleString()} sats` +
+          (memo ? `\nMemo: ${memo}` : '') +
+          `\n\nScan or copy the invoice above. It expires shortly! 🕐`,
+      });
     } catch (err: any) {
       await ctx.reply(`❌ Error creating invoice: ${err.message}`);
     }
@@ -255,13 +260,14 @@ export function registerHandlers(bot: Bot) {
     try {
       const { prepareResponse, feesSat } = await liquidAdapter.prepareReceive(tgId, mnemonic);
       const address = await liquidAdapter.executeReceive(tgId, mnemonic, prepareResponse);
-      await ctx.reply(
-        '💵 *Liquid USDT Receive Address*\n\n' +
-          `\`${address}\`\n\n` +
+      const { source } = await qrInputFile(String(address));
+      await ctx.replyWithPhoto(source, {
+        caption:
+          '💵 Liquid USDT Receive Address\n\n' +
+          `${address}\n\n` +
           `Fee: ${feesSat} sats\n` +
           'Send USDT (Liquid) to this address.',
-        { parse_mode: 'Markdown' }
-      );
+      });
     } catch (err: any) {
       await ctx.reply(`❌ Error: ${err.message}`);
     }
@@ -554,5 +560,14 @@ export function registerHandlers(bot: Bot) {
     }
 
     await safeSend(ctx, response);
+
+    // Auto-attach QR code if the agent response contains an invoice or address
+    const qrMatch = response.match(/(lnbc[a-z0-9]{50,}|spark1[a-z0-9]{30,}|bc1[a-z0-9]{25,}|lq1[a-z0-9]{25,})/i);
+    if (qrMatch) {
+      try {
+        const { source } = await qrInputFile(qrMatch[1]!);
+        await ctx.replyWithPhoto(source, { caption: '📱 Scan to pay / receive' });
+      } catch (_) { /* QR generation failed, not critical */ }
+    }
   });
 }

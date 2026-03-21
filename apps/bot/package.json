@@ -10,18 +10,20 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "grammy": "^1.30.0",
-    "dotenv": "^16.4.0",
-    "bip39": "^3.1.0",
-    "drizzle-orm": "^0.38.0",
-    "@sats-fast/shared": "workspace:*",
-    "@sats-fast/wallet-spark": "workspace:*",
-    "@sats-fast/wallet-liquid": "workspace:*",
+    "@sats-fast/agent": "workspace:*",
     "@sats-fast/policy": "workspace:*",
     "@sats-fast/receipts": "workspace:*",
-    "@sats-fast/agent": "workspace:*"
+    "@sats-fast/shared": "workspace:*",
+    "@sats-fast/wallet-liquid": "workspace:*",
+    "@sats-fast/wallet-spark": "workspace:*",
+    "bip39": "^3.1.0",
+    "dotenv": "^16.4.0",
+    "drizzle-orm": "^0.38.0",
+    "grammy": "^1.30.0",
+    "qrcode": "^1.5.4"
   },
   "devDependencies": {
+    "@types/qrcode": "^1.5.6",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
   }
