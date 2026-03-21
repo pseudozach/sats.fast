@@ -206,9 +206,9 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
   // ── Lightning Address & LNURL tools ───────────────────
 
   const resolveLightningAddress = tool(
-    async ({ address, amountSats }) => {
+    async ({ address, amountSats, deductFeesFromAmount }) => {
       try {
-        console.log(`[Tool:resolve_lightning_address] address=${address}, amountSats=${amountSats}`);
+        console.log(`[Tool:resolve_lightning_address] address=${address}, amountSats=${amountSats}, deductFees=${deductFeesFromAmount}`);
 
         // Parse user@domain
         const atIndex = address.indexOf('@');
@@ -235,48 +235,83 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
         const minSat = Math.ceil((meta.minSendable as number) / 1000);
         const maxSat = Math.floor((meta.maxSendable as number) / 1000);
 
-        if (amountSats < minSat || amountSats > maxSat) {
-          return JSON.stringify({
-            success: false,
-            error: `Amount ${amountSats} sats outside limits for this address: ${minSat}–${maxSat.toLocaleString()} sats`,
-          });
+        // Helper to fetch an invoice for a given sat amount
+        const fetchInvoice = async (sats: number): Promise<string> => {
+          const ms = sats * 1000;
+          const cb = new URL(meta.callback as string);
+          cb.searchParams.set('amount', String(ms));
+          console.log(`[Tool:resolve_lightning_address] requesting invoice from ${cb.toString()}`);
+          const res = await fetch(cb.toString());
+          if (!res.ok) throw new Error(`Failed to get invoice from provider: HTTP ${res.status}`);
+          const data = await res.json() as Record<string, unknown>;
+          if (!data.pr) throw new Error('No invoice returned from lightning address provider.');
+          return data.pr as string;
+        };
+
+        let sendAmount = amountSats;
+
+        if (deductFeesFromAmount) {
+          // "Send all" flow: probe for fee, then create final invoice with fee deducted
+          if (sendAmount < minSat || sendAmount > maxSat) {
+            return JSON.stringify({
+              success: false,
+              error: `Amount ${sendAmount} sats outside limits for this address: ${minSat}–${maxSat.toLocaleString()} sats`,
+            });
+          }
+
+          // Probe: get invoice for full amount just to estimate the fee
+          console.log(`[Tool:resolve_lightning_address] deductFees=true, probing fee for ${sendAmount} sats`);
+          const probeInvoice = await fetchInvoice(sendAmount);
+          let estimatedFee = 0;
+          try {
+            estimatedFee = await sparkAdapter.estimateFee(userId, mnemonic, probeInvoice);
+          } catch (_) { estimatedFee = 10; /* safe fallback */ }
+
+          // Deduct fee from the send amount
+          sendAmount = amountSats - estimatedFee;
+          console.log(`[Tool:resolve_lightning_address] fee≈${estimatedFee}, adjusted sendAmount=${sendAmount}`);
+
+          if (sendAmount < minSat) {
+            return JSON.stringify({
+              success: false,
+              error: `After deducting ~${estimatedFee} sats fee, only ${sendAmount} sats remain — below the minimum ${minSat} sats for this address.`,
+            });
+          }
+        } else {
+          // Normal flow: validate amount
+          if (sendAmount < minSat || sendAmount > maxSat) {
+            return JSON.stringify({
+              success: false,
+              error: `Amount ${sendAmount} sats outside limits for this address: ${minSat}–${maxSat.toLocaleString()} sats`,
+            });
+          }
         }
 
-        // Step 2: Request invoice from callback
-        const amountMillisats = amountSats * 1000;
-        const callbackUrl = new URL(meta.callback as string);
-        callbackUrl.searchParams.set('amount', String(amountMillisats));
+        // Step 2: Get the final invoice for sendAmount
+        const bolt11 = await fetchInvoice(sendAmount);
 
-        console.log(`[Tool:resolve_lightning_address] requesting invoice from ${callbackUrl.toString()}`);
-        const invoiceRes = await fetch(callbackUrl.toString());
-        if (!invoiceRes.ok) {
-          return JSON.stringify({ success: false, error: `Failed to get invoice from provider: HTTP ${invoiceRes.status}` });
-        }
-        const invoiceData = await invoiceRes.json() as Record<string, unknown>;
-
-        if (!invoiceData.pr) {
-          return JSON.stringify({ success: false, error: 'No invoice returned from lightning address provider.' });
-        }
-
-        const bolt11 = invoiceData.pr as string;
-
-        // Step 3: Estimate fee via Spark
+        // Step 3: Estimate fee on the actual invoice
         let estimatedFeeSats = 0;
         try {
           estimatedFeeSats = await sparkAdapter.estimateFee(userId, mnemonic, bolt11);
         } catch (_) { /* fee estimation is best-effort */ }
 
-        console.log(`[Tool:resolve_lightning_address] resolved → invoice ${bolt11.substring(0, 40)}..., fee≈${estimatedFeeSats}`);
+        console.log(`[Tool:resolve_lightning_address] resolved → invoice ${bolt11.substring(0, 40)}..., sendAmount=${sendAmount}, fee≈${estimatedFeeSats}`);
 
         return JSON.stringify({
           success: true,
           address,
           invoice: bolt11,
-          amountSats,
+          amountSats: sendAmount,
           estimatedFeeSats,
+          totalNeeded: sendAmount + estimatedFeeSats,
+          originalAmount: amountSats,
+          feesDeducted: deductFeesFromAmount || false,
           minSat,
           maxSat,
-          message: `Resolved ${address} → Lightning invoice for ${amountSats.toLocaleString()} sats. Estimated routing fee: ${estimatedFeeSats} sats. Ready to pay with spark_pay_invoice.`,
+          message: deductFeesFromAmount
+            ? `Resolved ${address} → invoice for ${sendAmount.toLocaleString()} sats (fees deducted from ${amountSats.toLocaleString()} sats balance). Routing fee: ~${estimatedFeeSats} sats. Total: ${sendAmount + estimatedFeeSats} sats. Ready to pay.`
+            : `Resolved ${address} → Lightning invoice for ${sendAmount.toLocaleString()} sats. Estimated routing fee: ${estimatedFeeSats} sats. Ready to pay with spark_pay_invoice.`,
         });
       } catch (err: any) {
         console.error(`[Tool:resolve_lightning_address] ERROR:`, err);
@@ -290,10 +325,13 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
         'Supports any lightning address (LNURL-pay). Fetches the LNURL pay endpoint, ' +
         'requests an invoice for the specified amount, and estimates the routing fee. ' +
         'After resolving, use spark_pay_invoice to pay the returned invoice. ' +
-        'The invoice is only valid for a short time, so pay it promptly after resolving.',
+        'The invoice is only valid for a short time, so pay it promptly after resolving. ' +
+        'IMPORTANT: When sending the user\'s ENTIRE balance (send all / send max), set deductFeesFromAmount=true ' +
+        'and pass the full balance as amountSats. The tool will auto-deduct routing fees so the payment succeeds on the first try.',
       schema: z.object({
         address: z.string().describe('Lightning address in user@domain format (e.g. pseudozach@sats.fast)'),
-        amountSats: z.number().positive().describe('Amount in satoshis to send'),
+        amountSats: z.number().positive().describe('Amount in satoshis to send (pass full balance when deductFeesFromAmount=true)'),
+        deductFeesFromAmount: z.boolean().optional().default(false).describe('Set to true when sending the ENTIRE wallet balance. The tool will probe for fees and create an invoice for (amount - fee) so the payment succeeds without "insufficient balance" errors.'),
       }),
     }
   );

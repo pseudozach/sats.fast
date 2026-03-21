@@ -74,6 +74,13 @@ LIGHTNING ADDRESS & LNURL RULES:
   3. Call policy_check with actionType "send".
   4. Call spark_pay_invoice with the resolved bolt11 invoice.
   5. Call receipt_save after success.
+- SEND ALL / SEND MAX: When the user says "send all", "send everything", "send my full balance", "empty my wallet", etc.:
+  1. Get the balance with spark_get_balance.
+  2. Call resolve_lightning_address with amountSats = the full balance AND deductFeesFromAmount = true.
+     This auto-deducts the routing fee from the amount so the payment succeeds on the first try.
+  3. The tool returns the adjusted amount and invoice. Show the user the send amount and fee.
+  4. Pay with spark_pay_invoice using maxFeeSats from the tool's estimatedFeeSats (add a small buffer, e.g. +5).
+  5. Do NOT manually subtract fees and retry. The tool handles it. ONE call is enough.
 - When the user says "send X USDT to user@sats.fast" (dollar/USDT amount to a sats.fast address specifically):
   1. First call resolve_satsfast_liquid with the username to try to get their Liquid USDT address.
   2. If successful, use liquid_send_prepare and liquid_send_execute to send USDT to that address.
