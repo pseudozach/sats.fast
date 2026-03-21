@@ -13,7 +13,7 @@ main() {
 IS_MACOS=0
 if [[ "$(uname -s)" == "Darwin" ]]; then
   IS_MACOS=1
-  INSTALL_DIR="$HOME/sats-fast-agent"
+  INSTALL_DIR="$HOME/Documents/sats-fast-agent"
 else
   INSTALL_DIR="/opt/sats-fast"
 fi
