@@ -34,12 +34,12 @@ function createLLM(config: AgentConfig): BaseChatModel {
   }
 
   // Default: Anthropic
+  // topP must be set explicitly — LangChain defaults to -1 which Anthropic rejects
   return new ChatAnthropic({
     anthropicApiKey: config.apiKey,
     modelName: config.model || 'claude-sonnet-4-6',
     temperature: 0,
-    topP: null as unknown as undefined,
-    topK: null as unknown as undefined,
+    topP: 1,
     maxTokens: 4096,
   }) as unknown as BaseChatModel;
 }
