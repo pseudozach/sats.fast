@@ -50,6 +50,22 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
     }
   );
 
+  const sparkGetPublicKey = tool(
+    async () => {
+      try {
+        const pubkey = await sparkAdapter.getIdentityPublicKey(userId, mnemonic);
+        return `Spark identity public key: ${pubkey}`;
+      } catch (err: any) {
+        return `Error: ${err.message}`;
+      }
+    },
+    {
+      name: 'spark_get_public_key',
+      description: 'Get the user\'s Spark identity public key (hex). This is the primary wallet identifier.',
+      schema: z.object({}),
+    }
+  );
+
   const sparkGetDepositAddress = tool(
     async () => {
       try {
@@ -1253,6 +1269,7 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
   return [
     sparkGetBalance,
     sparkGetAddress,
+    sparkGetPublicKey,
     sparkGetDepositAddress,
     sparkCreateInvoice,
     sparkFeeEstimate,

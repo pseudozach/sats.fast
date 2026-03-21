@@ -67,6 +67,30 @@ export class SparkAdapter {
   }
 
   /**
+   * Get the Spark identity public key (hex).
+   * This is the primary wallet identifier derived at m/8797555'/n'/0'.
+   */
+  async getIdentityPublicKey(userId: string, mnemonic: string): Promise<string> {
+    const account = await this.getAccount(userId, mnemonic);
+    // The WDK stores the underlying SparkWallet as _wallet (private).
+    // SparkWallet.getIdentityPublicKey() returns the hex-encoded identity pubkey.
+    const wallet = (account as any)._wallet;
+    if (wallet && typeof wallet.getIdentityPublicKey === 'function') {
+      const pubkey = await wallet.getIdentityPublicKey();
+      console.log(`[SparkAdapter] getIdentityPublicKey: ${pubkey}`);
+      return pubkey;
+    }
+    // Fallback: read from keyPair (Uint8Array → hex)
+    const kp = (account as any).keyPair;
+    if (kp?.publicKey) {
+      const hex = Buffer.from(kp.publicKey).toString('hex');
+      console.log(`[SparkAdapter] getIdentityPublicKey (keyPair fallback): ${hex}`);
+      return hex;
+    }
+    throw new Error('Unable to retrieve identity public key from Spark wallet');
+  }
+
+  /**
    * Get balance in satoshis.
    */
   async getBalance(userId: string, mnemonic: string): Promise<bigint> {
