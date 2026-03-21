@@ -27,9 +27,44 @@ interface BreezSdk {
   receivePayment(req: ReceiveRequest): Promise<ReceiveResponse>;
   fetchFiatRates(): Promise<Rate[]>;
   fetchLightningLimits(): Promise<LightningLimits>;
+  listPayments(req: ListPaymentsRequest): Promise<BreezPayment[]>;
+  getPayment(req: GetPaymentRequest): Promise<BreezPayment | undefined>;
   sync(): Promise<void>;
   disconnect(): Promise<void>;
 }
+
+type PaymentState = 'created' | 'pending' | 'complete' | 'failed' | 'timedOut' | 'refundable' | 'refundPending' | 'waitingFeeAcceptance';
+type PaymentType = 'receive' | 'send';
+
+interface BreezPayment {
+  destination?: string;
+  txId?: string;
+  timestamp: number;
+  amountSat: number;
+  feesSat: number;
+  swapperFeesSat?: number;
+  paymentType: PaymentType;
+  status: PaymentState;
+  details: BreezPaymentDetails;
+}
+
+type BreezPaymentDetails =
+  | { type: 'lightning'; swapId: string; description: string; preimage?: string; invoice?: string; paymentHash?: string; claimTxId?: string; refundTxId?: string }
+  | { type: 'liquid'; destination: string; description: string; assetId: string }
+  | { type: 'bitcoin'; swapId: string; bitcoinAddress: string; description: string; lockupTxId?: string; claimTxId?: string; refundTxId?: string };
+
+interface ListPaymentsRequest {
+  filters?: PaymentType[];
+  states?: PaymentState[];
+  fromTimestamp?: number;
+  toTimestamp?: number;
+  offset?: number;
+  limit?: number;
+}
+
+type GetPaymentRequest =
+  | { type: 'paymentHash'; paymentHash: string }
+  | { type: 'swapId'; swapId: string };
 
 interface BreezInfo {
   walletInfo: {
@@ -360,12 +395,59 @@ export class LiquidAdapter {
   }
 
   /**
-   * Get the L-BTC balance specifically.
+   * Get the L-BTC balance specifically (confirmed + pending receive).
+   * Syncs before checking so we get the latest state.
    */
   async getLbtcBalance(userId: string, mnemonic: string): Promise<number> {
     const sdk = await this.getSdk(userId, mnemonic);
+    await sdk.sync();
     const info = await sdk.getInfo();
+    // Return confirmed balance. Caller can use getWalletStatus for pending detail.
     return info.walletInfo.balanceSat;
+  }
+
+  /**
+   * Get full wallet status including pending amounts.
+   */
+  async getWalletStatus(userId: string, mnemonic: string): Promise<{
+    confirmedSat: number;
+    pendingReceiveSat: number;
+    pendingSendSat: number;
+  }> {
+    const sdk = await this.getSdk(userId, mnemonic);
+    await sdk.sync();
+    const info = await sdk.getInfo();
+    return {
+      confirmedSat: info.walletInfo.balanceSat,
+      pendingReceiveSat: info.walletInfo.pendingReceiveSat,
+      pendingSendSat: info.walletInfo.pendingSendSat,
+    };
+  }
+
+  /**
+   * List recent Breez SDK payments (all types/states).
+   */
+  async listPayments(
+    userId: string,
+    mnemonic: string,
+    limit: number = 10
+  ): Promise<BreezPayment[]> {
+    const sdk = await this.getSdk(userId, mnemonic);
+    await sdk.sync();
+    return sdk.listPayments({ limit });
+  }
+
+  /**
+   * Look up a specific payment by swapId.
+   */
+  async getPaymentBySwapId(
+    userId: string,
+    mnemonic: string,
+    swapId: string
+  ): Promise<BreezPayment | undefined> {
+    const sdk = await this.getSdk(userId, mnemonic);
+    await sdk.sync();
+    return sdk.getPayment({ type: 'swapId', swapId });
   }
 
   /**

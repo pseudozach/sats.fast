@@ -585,32 +585,70 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
           }
         }
 
-        // Step 4: Wait for L-BTC to arrive in Liquid wallet
+        // Step 4: Wait for L-BTC to arrive in Liquid wallet (confirmed or pending)
         const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
         let lbtcBalance = 0;
+        let pendingReceive = 0;
         for (let i = 0; i < 30; i++) {
           await sleep(2000);
-          lbtcBalance = await liquidAdapter.getLbtcBalance(userId, mnemonic);
-          console.log(`[Tool:swap_btc_to_usdt] poll ${i + 1}/30: lbtcBalance=${lbtcBalance}`);
-          if (lbtcBalance > 0) break;
+          try {
+            const status = await liquidAdapter.getWalletStatus(userId, mnemonic);
+            lbtcBalance = status.confirmedSat;
+            pendingReceive = status.pendingReceiveSat;
+            console.log(`[Tool:swap_btc_to_usdt] poll ${i + 1}/30: confirmed=${lbtcBalance}, pending=${pendingReceive}`);
+            if (lbtcBalance > 0) break;
+          } catch (pollErr: any) {
+            console.log(`[Tool:swap_btc_to_usdt] poll ${i + 1}/30: error=${pollErr.message}`);
+          }
         }
 
         if (lbtcBalance <= 0) {
+          // Check Breez payment list for the swap status
+          let swapStatus = 'unknown';
+          let swapId: string | null = null;
+          let claimTxId: string | null = null;
+          try {
+            const payments = await liquidAdapter.listPayments(userId, mnemonic, 5);
+            const recentReceive = payments.find(
+              (p) => p.paymentType === 'receive' && p.details?.type === 'lightning'
+            );
+            if (recentReceive) {
+              swapStatus = recentReceive.status;
+              const det = recentReceive.details as { swapId?: string; claimTxId?: string };
+              swapId = det.swapId ?? null;
+              claimTxId = det.claimTxId ?? null;
+              console.log(`[Tool:swap_btc_to_usdt] swap found: status=${swapStatus}, swapId=${swapId}, claimTxId=${claimTxId}`);
+            }
+          } catch (_) { /* best effort */ }
+
+          // If it's pending, it's still in the pipeline — wait longer or report
+          const isPending = swapStatus === 'pending' || swapStatus === 'created' || pendingReceive > 0;
+
           // Auto-save a partial receipt so we have a record
           try {
             await saveReceipt({
               userId: dbUserId,
-              actionType: 'swap_btc_to_usdt (pending)',
+              actionType: isPending ? 'swap_btc_to_usdt (pending)' : 'swap_btc_to_usdt (timeout)',
               amountSats: actualInvoiceAmount,
               feeSats: receiveFee,
-              txId: sparkPaymentId ?? undefined,
-              extra: { status: 'pending_lbtc', sparkPaymentId },
+              txId: claimTxId ?? sparkPaymentId ?? undefined,
+              extra: { status: swapStatus, sparkPaymentId, swapId, claimTxId, pendingReceive },
             });
           } catch (_) { /* best effort */ }
+
+          const statusMsg = isPending
+            ? `BTC was sent and the Lightning→Liquid swap is still processing (status: ${swapStatus}, pending: ${pendingReceive} sats). This is normal and can take 2-5 minutes. Your funds are safe.`
+            : `BTC was sent from Spark but L-BTC hasn't been confirmed in Liquid yet (swap status: ${swapStatus}). Your funds are in transit — check back shortly.`;
+
           return JSON.stringify({
             success: false,
+            pending: isPending,
             sparkPaymentId,
-            error: 'BTC was sent to Liquid wallet but L-BTC has not arrived yet. This can take a few minutes. Please try checking your balance again shortly.',
+            swapId,
+            claimTxId,
+            swapStatus,
+            pendingReceiveSat: pendingReceive,
+            error: statusMsg,
           });
         }
 
@@ -1048,6 +1086,54 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
     }
   );
 
+  const liquidPayments = tool(
+    async ({ limit }) => {
+      try {
+        console.log(`[Tool:liquid_payments] fetching last ${limit} payments...`);
+        const payments = await liquidAdapter.listPayments(userId, mnemonic, limit);
+        if (!payments || payments.length === 0) {
+          return 'No Liquid/Breez SDK payments found.';
+        }
+        return payments
+          .map((p, i) => {
+            const parts = [
+              `${i + 1}. ${p.paymentType.toUpperCase()} — ${p.status} — ${p.amountSat.toLocaleString()} sats`,
+              `   Fees: ${p.feesSat} sats${p.swapperFeesSat ? ` (swapper: ${p.swapperFeesSat} sats)` : ''}`,
+              p.txId ? `   Tx ID: ${p.txId}` : null,
+              p.destination ? `   Destination: ${p.destination.substring(0, 40)}...` : null,
+              `   Time: ${new Date(p.timestamp * 1000).toISOString()}`,
+            ];
+            // Add details based on type
+            const d = p.details;
+            if (d.type === 'lightning') {
+              if (d.swapId) parts.push(`   Swap ID: ${d.swapId}`);
+              if (d.paymentHash) parts.push(`   Payment Hash: ${d.paymentHash}`);
+              if (d.claimTxId) parts.push(`   Claim Tx: ${d.claimTxId}`);
+              if (d.refundTxId) parts.push(`   Refund Tx: ${d.refundTxId}`);
+              if (d.invoice) parts.push(`   Invoice: ${d.invoice.substring(0, 50)}...`);
+            } else if (d.type === 'liquid') {
+              parts.push(`   Asset: ${d.assetId === USDT_ASSET_ID ? 'USDT' : d.assetId === LBTC_ASSET_ID ? 'L-BTC' : d.assetId.substring(0, 16)}...`);
+            }
+            return parts.filter(Boolean).join('\n');
+          })
+          .join('\n\n');
+      } catch (err: any) {
+        console.error(`[Tool:liquid_payments] ERROR:`, err);
+        return `Error fetching Liquid payments: ${err.message}`;
+      }
+    },
+    {
+      name: 'liquid_payments',
+      description:
+        'List recent payments from the Breez SDK / Liquid wallet. Shows ALL payments including pending swaps, ' +
+        'with full details: txId, swapId, paymentHash, claimTxId, status, fees. ' +
+        'Use this to investigate where funds went, check swap status, or find transaction IDs.',
+      schema: z.object({
+        limit: z.number().optional().default(10).describe('Number of payments to retrieve'),
+      }),
+    }
+  );
+
   return [
     sparkGetBalance,
     sparkGetAddress,
@@ -1071,6 +1157,7 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
     policyUpdate,
     receiptSave,
     historyGet,
+    liquidPayments,
     btcPrice,
     usdToSats,
   ];
