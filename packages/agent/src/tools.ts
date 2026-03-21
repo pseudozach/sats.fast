@@ -77,7 +77,7 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
     },
     {
       name: 'spark_get_deposit_address',
-      description: 'Get a single-use Bitcoin L1 deposit address to fund the Spark wallet.',
+      description: 'LAST RESORT ONLY — Get a single-use Bitcoin L1 on-chain deposit address. WARNING: On-chain deposits may require manual claiming and take much longer. ALWAYS prefer spark_create_invoice (Lightning invoice) instead. Only use this if the user explicitly requests an on-chain/L1 address after being warned.',
       schema: z.object({}),
     }
   );

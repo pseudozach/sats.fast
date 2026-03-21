@@ -65,7 +65,7 @@ export function registerHandlers(bot: Bot) {
     await ctx.reply(
       '📖 sats.fast Commands\n\n' +
         '/balance — Show both wallet balances\n' +
-        '/deposit — Get BTC deposit address\n' +
+        '/deposit — Get Lightning deposit invoice\n' +
         '/invoice [amt] — Create Lightning invoice\n' +
         '/pay [bolt11] — Pay Lightning invoice\n' +
         '/send [addr] [amt] — Send BTC or USDT\n' +
@@ -148,14 +148,18 @@ export function registerHandlers(bot: Bot) {
     const { mnemonic } = await getOrCreateUser(tgId, ctx.from?.username);
 
     try {
-      const addr = await sparkAdapter.getDepositAddress(tgId, mnemonic);
-      const { source } = await qrInputFile(addr);
+      // Default to a 100k sats invoice — user can also use /invoice <amt> for a specific amount
+      const defaultSats = 100_000;
+      const result = await sparkAdapter.createInvoice(tgId, mnemonic, defaultSats, 'Deposit via sats.fast');
+      const bolt11 = result?.invoice?.encodedInvoice || result?.invoice || 'unknown';
+      const { source } = await qrInputFile(String(bolt11));
       await ctx.replyWithPhoto(source, {
         caption:
-          '⚡ Bitcoin Deposit Address\n\n' +
-          `${addr}\n\n` +
-          'Send BTC on-chain to this single-use address.\n' +
-          'It will appear in your Lightning balance after confirmations.',
+          '⚡ Lightning Deposit Invoice\n\n' +
+          `${bolt11}\n\n` +
+          `Amount: ${defaultSats.toLocaleString()} sats\n\n` +
+          'Scan or paste this in any Lightning-enabled app (Cash App, Strike, etc.)\n' +
+          'Use /invoice [amount] for a specific sat amount.',
       });
     } catch (err: any) {
       await ctx.reply(`❌ Error: ${err.message}`);
