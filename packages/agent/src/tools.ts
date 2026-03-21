@@ -550,9 +550,12 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
         }
 
         // Step 3: Pay the invoice from Spark (moves BTC → Liquid as L-BTC)
+        let sparkPaymentId: string | null = null;
+        let actualInvoiceAmount = invoiceAmount;
         try {
           const payResult = await sparkAdapter.payInvoice(userId, mnemonic, invoice, 1000);
-          console.log(`[Tool:swap_btc_to_usdt] Spark payment sent, status=${payResult?.status}`);
+          sparkPaymentId = payResult?.id ?? null;
+          console.log(`[Tool:swap_btc_to_usdt] Spark payment sent, id=${sparkPaymentId}, status=${payResult?.status}`);
         } catch (err: any) {
           // If still not enough, try once more with a bigger buffer
           if (err.message?.includes('insufficient') || err.message?.includes('fee') || err.message?.includes('balance')) {
@@ -563,9 +566,11 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
             }
             try {
               const rcv2 = await liquidAdapter.createLightningInvoice(userId, mnemonic, smallerAmount);
-              await sparkAdapter.payInvoice(userId, mnemonic, rcv2.invoice, 1000);
+              const retryPay = await sparkAdapter.payInvoice(userId, mnemonic, rcv2.invoice, 1000);
               receiveFee = rcv2.feesSat;
-              console.log(`[Tool:swap_btc_to_usdt] retry succeeded with ${smallerAmount} sats`);
+              actualInvoiceAmount = smallerAmount;
+              sparkPaymentId = retryPay?.id ?? null;
+              console.log(`[Tool:swap_btc_to_usdt] retry succeeded with ${smallerAmount} sats, id=${sparkPaymentId}`);
             } catch (retryErr: any) {
               return JSON.stringify({
                 success: false,
@@ -591,8 +596,20 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
         }
 
         if (lbtcBalance <= 0) {
+          // Auto-save a partial receipt so we have a record
+          try {
+            await saveReceipt({
+              userId: dbUserId,
+              actionType: 'swap_btc_to_usdt (pending)',
+              amountSats: actualInvoiceAmount,
+              feeSats: receiveFee,
+              txId: sparkPaymentId ?? undefined,
+              extra: { status: 'pending_lbtc', sparkPaymentId },
+            });
+          } catch (_) { /* best effort */ }
           return JSON.stringify({
             success: false,
+            sparkPaymentId,
             error: 'BTC was sent to Liquid wallet but L-BTC has not arrived yet. This can take a few minutes. Please try checking your balance again shortly.',
           });
         }
@@ -621,20 +638,59 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
         // Step 6: Swap L-BTC → USDT via self-payment
         try {
           const swapResult = await liquidAdapter.swapLbtcToUsdt(userId, mnemonic, usdtAmount);
-          console.log(`[Tool:swap_btc_to_usdt] swap done, feesSat=${swapResult.feesSat}`);
+          const swapTxId = swapResult.txId ?? null;
+          console.log(`[Tool:swap_btc_to_usdt] swap done, feesSat=${swapResult.feesSat}, txId=${swapTxId}`);
+
+          // Auto-save receipt with all transaction IDs
+          const totalFee = receiveFee + (swapResult.feesSat ?? 0);
+          let receiptSummary = '';
+          try {
+            receiptSummary = await saveReceipt({
+              userId: dbUserId,
+              actionType: 'swap_btc_to_usdt',
+              amountSats: actualInvoiceAmount,
+              feeSats: totalFee,
+              txId: swapTxId ?? sparkPaymentId ?? undefined,
+              extra: {
+                sparkPaymentId,
+                liquidSwapTxId: swapTxId,
+                lightningReceiveFee: receiveFee,
+                swapFee: swapResult.feesSat,
+                usdtReceived: usdtAmount,
+                btcPriceUsd: btcPrice,
+              },
+            });
+          } catch (receiptErr: any) {
+            console.error(`[Tool:swap_btc_to_usdt] receipt save error:`, receiptErr);
+          }
 
           return JSON.stringify({
             success: true,
-            amountSatsSent: invoiceAmount,
+            amountSatsSent: actualInvoiceAmount,
             usdtReceived: usdtAmount,
             lightningFee: receiveFee,
             swapFee: swapResult.feesSat,
-            message: `Converted ${invoiceAmount.toLocaleString()} sats → ~${usdtAmount.toFixed(2)} USDT`,
+            sparkPaymentId,
+            liquidSwapTxId: swapTxId,
+            receiptSaved: !!receiptSummary,
+            message: `Converted ${actualInvoiceAmount.toLocaleString()} sats → ~${usdtAmount.toFixed(2)} USDT`,
           });
         } catch (err: any) {
           console.error(`[Tool:swap_btc_to_usdt] swap error:`, err);
+          // Save partial receipt for L-BTC that arrived but couldn't swap
+          try {
+            await saveReceipt({
+              userId: dbUserId,
+              actionType: 'swap_btc_to_usdt (partial)',
+              amountSats: actualInvoiceAmount,
+              feeSats: receiveFee,
+              txId: sparkPaymentId ?? undefined,
+              extra: { status: 'lbtc_arrived_swap_failed', lbtcBalance, sparkPaymentId, error: err.message },
+            });
+          } catch (_) { /* best effort */ }
           return JSON.stringify({
             success: false,
+            sparkPaymentId,
             error: `L-BTC arrived (${lbtcBalance} sats) but swap to USDT failed: ${err.message}. The L-BTC is safe in your Liquid wallet.`,
           });
         }
@@ -648,7 +704,8 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
       description:
         'EXECUTE a BTC → USDT conversion. Automatically reserves sats for Lightning routing fees. ' +
         'If the amount is close to full balance, it auto-adjusts down to ensure the payment succeeds. ' +
-        'Takes 10-60 seconds. ' +
+        'Takes 10-60 seconds. Returns sparkPaymentId and liquidSwapTxId for tracking. ' +
+        'Automatically saves a receipt to the DB — do NOT call receipt_save after this tool. ' +
         'MUST call swap_estimate_btc_to_usdt first and show fees to user. ' +
         'MUST call policy_check with actionType "swap". ' +
         'Only execute AFTER user confirms the fee breakdown.',
@@ -688,10 +745,12 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
 
         // Step 3: Swap USDT → L-BTC via self-payment
         let swapFee = 0;
+        let swapTxId: string | null = null;
         try {
           const swapResult = await liquidAdapter.swapUsdtToLbtc(userId, mnemonic, lbtcAmountSat);
           swapFee = swapResult.feesSat;
-          console.log(`[Tool:swap_usdt_to_btc] swap done, feesSat=${swapFee}`);
+          swapTxId = swapResult.txId ?? null;
+          console.log(`[Tool:swap_usdt_to_btc] swap done, feesSat=${swapFee}, txId=${swapTxId}`);
         } catch (err: any) {
           return JSON.stringify({
             success: false,
@@ -706,8 +765,20 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
           sparkInvoice = invoiceResult?.invoice?.encodedInvoice || invoiceResult?.invoice;
           console.log(`[Tool:swap_usdt_to_btc] Spark invoice created`);
         } catch (err: any) {
+          // Save partial receipt
+          try {
+            await saveReceipt({
+              userId: dbUserId,
+              actionType: 'swap_usdt_to_btc (partial)',
+              amountSats: lbtcAmountSat,
+              feeSats: swapFee,
+              txId: swapTxId ?? undefined,
+              extra: { status: 'lbtc_swapped_invoice_failed', swapTxId, usdtAmount, error: err.message },
+            });
+          } catch (_) { /* best effort */ }
           return JSON.stringify({
             success: false,
+            swapTxId,
             error: `L-BTC swap succeeded but failed to create Spark invoice: ${err.message}. L-BTC is in your Liquid wallet.`,
           });
         }
@@ -715,7 +786,32 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
         // Step 5: Pay the Spark invoice from Liquid L-BTC
         try {
           const payResult = await liquidAdapter.payLightningInvoice(userId, mnemonic, sparkInvoice);
-          console.log(`[Tool:swap_usdt_to_btc] Liquid→Spark Lightning payment sent, feesSat=${payResult.feesSat}`);
+          const lnPayTxId = payResult.txId ?? null;
+          console.log(`[Tool:swap_usdt_to_btc] Liquid→Spark Lightning payment sent, feesSat=${payResult.feesSat}, txId=${lnPayTxId}`);
+
+          // Auto-save receipt with all transaction IDs
+          const totalFee = swapFee + (payResult.feesSat ?? 0);
+          let receiptSummary = '';
+          try {
+            receiptSummary = await saveReceipt({
+              userId: dbUserId,
+              actionType: 'swap_usdt_to_btc',
+              amountSats: lbtcAmountSat,
+              feeSats: totalFee,
+              txId: swapTxId ?? lnPayTxId ?? undefined,
+              extra: {
+                liquidSwapTxId: swapTxId,
+                lightningPayTxId: lnPayTxId,
+                swapFee,
+                lightningFee: payResult.feesSat,
+                usdtSent: usdtAmount,
+                btcReceivedSats: lbtcAmountSat,
+                btcPriceUsd: btcPrice,
+              },
+            });
+          } catch (receiptErr: any) {
+            console.error(`[Tool:swap_usdt_to_btc] receipt save error:`, receiptErr);
+          }
 
           return JSON.stringify({
             success: true,
@@ -723,11 +819,26 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
             btcReceivedSats: lbtcAmountSat,
             swapFee,
             lightningFee: payResult.feesSat,
+            liquidSwapTxId: swapTxId,
+            lightningPayTxId: lnPayTxId,
+            receiptSaved: !!receiptSummary,
             message: `Converted ${usdtAmount.toFixed(2)} USDT → ~${lbtcAmountSat.toLocaleString()} sats`,
           });
         } catch (err: any) {
+          // Save partial receipt
+          try {
+            await saveReceipt({
+              userId: dbUserId,
+              actionType: 'swap_usdt_to_btc (partial)',
+              amountSats: lbtcAmountSat,
+              feeSats: swapFee,
+              txId: swapTxId ?? undefined,
+              extra: { status: 'lbtc_swapped_ln_failed', swapTxId, usdtAmount, error: err.message },
+            });
+          } catch (_) { /* best effort */ }
           return JSON.stringify({
             success: false,
+            swapTxId,
             error: `USDT→L-BTC swap succeeded but Lightning payment to Spark failed: ${err.message}. BTC is in your Liquid wallet as L-BTC.`,
           });
         }
@@ -740,7 +851,8 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
       name: 'swap_usdt_to_btc',
       description:
         'EXECUTE a USDT → BTC conversion. Swaps USDT → L-BTC on Liquid, then sends L-BTC to Spark via Lightning. ' +
-        'Takes 10-60 seconds. ' +
+        'Takes 10-60 seconds. Returns liquidSwapTxId and lightningPayTxId for tracking. ' +
+        'Automatically saves a receipt to the DB — do NOT call receipt_save after this tool. ' +
         'MUST call swap_estimate_usdt_to_btc first and show fees to user. ' +
         'MUST call policy_check with actionType "swap". ' +
         'Only execute AFTER user confirms the fee breakdown.',
@@ -817,7 +929,7 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
     },
     {
       name: 'receipt_save',
-      description: 'Save a transaction receipt. MUST be called after every successful write operation.',
+      description: 'Save a transaction receipt. MUST be called after every successful write operation EXCEPT swaps (swap tools auto-save receipts). Always include txId if available.',
       schema: z.object({
         actionType: z.string().describe('Type of action performed'),
         amountSats: z.number().optional().describe('Amount in satoshis'),
@@ -837,7 +949,29 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
           return 'No transaction history yet.';
         }
         return items
-          .map((r, i) => `${i + 1}. ${r.actionType} — ${r.summary.split('\n').slice(0, 3).join(' | ')}`)
+          .map((r, i) => {
+            const parts = [
+              `${i + 1}. ${r.actionType} — ${r.createdAt}`,
+              r.txId ? `   Tx ID: ${r.txId}` : null,
+              r.amountSats ? `   Amount: ${r.amountSats.toLocaleString()} sats` : null,
+              r.feeSats ? `   Fee: ${r.feeSats} sats` : null,
+            ].filter(Boolean);
+            // Include extra JSON data if available (contains swap tx IDs, prices, etc.)
+            if (r.receiptJson) {
+              try {
+                const extra = JSON.parse(r.receiptJson);
+                if (extra.sparkPaymentId) parts.push(`   Spark Payment ID: ${extra.sparkPaymentId}`);
+                if (extra.liquidSwapTxId) parts.push(`   Liquid Swap Tx: ${extra.liquidSwapTxId}`);
+                if (extra.lightningPayTxId) parts.push(`   Lightning Pay Tx: ${extra.lightningPayTxId}`);
+                if (extra.usdtReceived) parts.push(`   USDT received: ${extra.usdtReceived}`);
+                if (extra.usdtSent) parts.push(`   USDT sent: ${extra.usdtSent}`);
+                if (extra.btcReceivedSats) parts.push(`   BTC received: ${extra.btcReceivedSats} sats`);
+                if (extra.btcPriceUsd) parts.push(`   BTC price: $${extra.btcPriceUsd}`);
+                if (extra.status) parts.push(`   Status: ${extra.status}`);
+              } catch (_) { /* ignore parse errors */ }
+            }
+            return parts.join('\n');
+          })
           .join('\n\n');
       } catch (err: any) {
         return `Error: ${err.message}`;
@@ -845,7 +979,7 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
     },
     {
       name: 'history_get',
-      description: 'Get recent transaction receipts/history for the user.',
+      description: 'Get recent transaction receipts/history for the user. Returns full details including transaction IDs, amounts, fees, and metadata.',
       schema: z.object({
         limit: z.number().optional().default(10).describe('Number of receipts to retrieve'),
       }),

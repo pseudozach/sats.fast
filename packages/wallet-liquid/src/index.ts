@@ -386,7 +386,7 @@ export class LiquidAdapter {
     userId: string,
     mnemonic: string,
     usdtAmount: number
-  ): Promise<{ feesSat: number; estimatedAssetFees?: number; payment: unknown }> {
+  ): Promise<{ feesSat: number; estimatedAssetFees?: number; txId: string | null; payment: unknown }> {
     const sdk = await this.getSdk(userId, mnemonic);
     console.log(`[LiquidAdapter:swapLbtcToUsdt] usdtAmount=${usdtAmount}`);
 
@@ -415,12 +415,15 @@ export class LiquidAdapter {
 
     // 3. Execute the swap
     const sendRes = await sdk.sendPayment({ prepareResponse: prepSend });
-    console.log(`[LiquidAdapter:swapLbtcToUsdt] swap complete`);
+    const payment = sendRes.payment as Record<string, unknown> | undefined;
+    const txId = (payment?.txId as string) ?? (payment?.id as string) ?? null;
+    console.log(`[LiquidAdapter:swapLbtcToUsdt] swap complete, txId=${txId}`);
 
     return {
       feesSat: prepSend.feesSat ?? 0,
       estimatedAssetFees: prepSend.estimatedAssetFees,
-      payment: sendRes.payment,
+      txId,
+      payment,
     };
   }
 
@@ -433,7 +436,7 @@ export class LiquidAdapter {
     userId: string,
     mnemonic: string,
     lbtcAmountSat: number
-  ): Promise<{ feesSat: number; estimatedAssetFees?: number; payment: unknown }> {
+  ): Promise<{ feesSat: number; estimatedAssetFees?: number; txId: string | null; payment: unknown }> {
     const sdk = await this.getSdk(userId, mnemonic);
     console.log(`[LiquidAdapter:swapUsdtToLbtc] lbtcAmountSat=${lbtcAmountSat}`);
 
@@ -464,12 +467,15 @@ export class LiquidAdapter {
 
     // 3. Execute
     const sendRes = await sdk.sendPayment({ prepareResponse: prepSend });
-    console.log(`[LiquidAdapter:swapUsdtToLbtc] swap complete`);
+    const payment = sendRes.payment as Record<string, unknown> | undefined;
+    const txId = (payment?.txId as string) ?? (payment?.id as string) ?? null;
+    console.log(`[LiquidAdapter:swapUsdtToLbtc] swap complete, txId=${txId}`);
 
     return {
       feesSat: prepSend.feesSat ?? 0,
       estimatedAssetFees: prepSend.estimatedAssetFees,
-      payment: sendRes.payment,
+      txId,
+      payment,
     };
   }
 
@@ -481,7 +487,7 @@ export class LiquidAdapter {
     userId: string,
     mnemonic: string,
     bolt11: string
-  ): Promise<{ feesSat: number; payment: unknown }> {
+  ): Promise<{ feesSat: number; txId: string | null; payment: unknown }> {
     const sdk = await this.getSdk(userId, mnemonic);
     console.log(`[LiquidAdapter:payLightningInvoice] bolt11=${bolt11.substring(0, 40)}...`);
 
@@ -491,11 +497,14 @@ export class LiquidAdapter {
     console.log(`[LiquidAdapter:payLightningInvoice] feesSat=${prepareResponse.feesSat}`);
 
     const sendRes = await sdk.sendPayment({ prepareResponse });
-    console.log(`[LiquidAdapter:payLightningInvoice] payment sent`);
+    const payment = sendRes.payment as Record<string, unknown> | undefined;
+    const txId = (payment?.txId as string) ?? (payment?.id as string) ?? null;
+    console.log(`[LiquidAdapter:payLightningInvoice] payment sent, txId=${txId}`);
 
     return {
       feesSat: prepareResponse.feesSat ?? 0,
-      payment: sendRes.payment,
+      txId,
+      payment,
     };
   }
 
