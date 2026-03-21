@@ -310,6 +310,23 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
 
   // ── Cross-asset swap tools ───────────────────────────
 
+  /**
+   * Helper: given a desired send amount and the user's Spark balance,
+   * compute the effective invoice amount that leaves room for Lightning routing fees.
+   * Lightning routing fees are typically < 1%, but we reserve 1% + 50 sats buffer.
+   */
+  function computeInvoiceAmount(requestedSats: number, availableSats: number): number {
+    // If user can cover the full amount + generous fee buffer, use the requested amount
+    const routingBuffer = Math.max(50, Math.ceil(requestedSats * 0.01)); // 1% or 50 sats min
+    if (availableSats >= requestedSats + routingBuffer) {
+      return requestedSats;
+    }
+    // Otherwise, shrink the invoice so Spark has room for routing fees
+    // Reserve 1.5% + 50 sats for routing from the available balance
+    const reserve = Math.max(50, Math.ceil(availableSats * 0.015));
+    return Math.max(0, availableSats - reserve);
+  }
+
   const swapEstimateBtcToUsdt = tool(
     async ({ amountSats }) => {
       try {
@@ -318,24 +335,34 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
         // 1. Check Spark balance
         const sparkBalance = await sparkAdapter.getBalance(userId, mnemonic);
         const available = Number(sparkBalance);
-        if (available < amountSats) {
+        if (available < 100) {
           return JSON.stringify({
             success: false,
-            error: `Insufficient Spark balance: ${available.toLocaleString()} sats available, need ${amountSats.toLocaleString()} sats`,
+            error: `Balance too low to swap: ${available.toLocaleString()} sats. Need at least 100 sats.`,
           });
         }
 
-        // 2. Get real-time BTC price
+        // 2. Auto-adjust amount to fit within balance (reserve for routing fees)
+        const effectiveSats = computeInvoiceAmount(amountSats, available);
+        if (effectiveSats < 100) {
+          return JSON.stringify({
+            success: false,
+            error: `After reserving for Lightning routing fees, only ${effectiveSats} sats would be sent — too low to swap.`,
+          });
+        }
+        const wasAdjusted = effectiveSats < amountSats;
+
+        // 3. Get real-time BTC price
         const price = await getBtcPrice();
         if (price <= 0) {
           return JSON.stringify({ success: false, error: 'Could not fetch BTC/USD price.' });
         }
 
-        // 3. Estimate Lightning bridge fee (Spark → Liquid)
+        // 4. Estimate Lightning bridge fee (Spark → Liquid)
         let lightningReceiveFee = 0;
         let lnLimits = { minSat: 0, maxSat: 0 };
         try {
-          const est = await liquidAdapter.estimateLightningReceiveFee(userId, mnemonic, amountSats);
+          const est = await liquidAdapter.estimateLightningReceiveFee(userId, mnemonic, effectiveSats);
           lightningReceiveFee = est.feesSat;
           lnLimits = { minSat: est.minSat, maxSat: est.maxSat };
         } catch (err: any) {
@@ -345,27 +372,32 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
           });
         }
 
-        // 4. Calculate amounts
-        const lbtcAfterLnFee = amountSats - lightningReceiveFee;
-        const grossUsdt = (lbtcAfterLnFee / 1e8) * price;
-        // SideSwap typically charges ~0.1% for L-BTC ↔ USDT swaps
+        // 5. Calculate amounts
+        const routingFeeEstimate = amountSats - effectiveSats; // what we reserved for routing
+        const lbtcReceived = effectiveSats - lightningReceiveFee; // what Liquid gets
+        const grossUsdt = (lbtcReceived / 1e8) * price;
         const swapSpreadPct = 0.1;
         const swapFeeUsdt = grossUsdt * (swapSpreadPct / 100);
         const estimatedUsdt = grossUsdt - swapFeeUsdt;
+        const totalFeeSats = routingFeeEstimate + lightningReceiveFee;
 
-        console.log(`[Tool:swap_estimate_btc_to_usdt] price=${price}, lnFee=${lightningReceiveFee}, gross=${grossUsdt.toFixed(2)}, net=${estimatedUsdt.toFixed(2)}`);
+        console.log(`[Tool:swap_estimate_btc_to_usdt] price=${price}, effective=${effectiveSats}, lnReceiveFee=${lightningReceiveFee}, routingReserve=${routingFeeEstimate}, net=${estimatedUsdt.toFixed(2)}`);
 
         return JSON.stringify({
           success: true,
           input: {
-            amountSats,
-            amountBtc: (amountSats / 1e8).toFixed(8),
-            amountUsdEquiv: ((amountSats / 1e8) * price).toFixed(2),
+            requestedSats: amountSats,
+            effectiveSats,
+            adjustedForFees: wasAdjusted,
+            amountBtc: (effectiveSats / 1e8).toFixed(8),
+            amountUsdEquiv: ((effectiveSats / 1e8) * price).toFixed(2),
           },
           fees: {
+            lightningRoutingReserve: `~${routingFeeEstimate} sats (~$${((routingFeeEstimate / 1e8) * price).toFixed(2)})`,
             lightningBridgeFee: `${lightningReceiveFee} sats (~$${((lightningReceiveFee / 1e8) * price).toFixed(2)})`,
             swapSpread: `~${swapSpreadPct}% (~$${swapFeeUsdt.toFixed(2)})`,
-            totalFeeUsd: `~$${(((lightningReceiveFee / 1e8) * price) + swapFeeUsdt).toFixed(2)}`,
+            totalFeeSats,
+            totalFeeUsd: `~$${((totalFeeSats / 1e8) * price + swapFeeUsdt).toFixed(2)}`,
           },
           output: {
             estimatedUsdt: estimatedUsdt.toFixed(2),
@@ -383,10 +415,10 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
       name: 'swap_estimate_btc_to_usdt',
       description:
         'Estimate fees and output for converting BTC → USDT WITHOUT executing. ' +
-        'Returns detailed fee breakdown: Lightning bridge fee, swap spread, estimated USDT output. ' +
-        'MUST be called before swap_btc_to_usdt so the user can review fees.',
+        'Automatically adjusts amount down to leave room for Lightning routing fees when converting full balance. ' +
+        'Returns detailed fee breakdown. MUST be called before swap_btc_to_usdt.',
       schema: z.object({
-        amountSats: z.number().positive().describe('Amount of BTC to convert, in satoshis'),
+        amountSats: z.number().positive().describe('Amount of BTC to convert, in satoshis. Use the full Spark balance for "convert all".'),
       }),
     }
   );
@@ -477,24 +509,39 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
       try {
         console.log(`[Tool:swap_btc_to_usdt] amountSats=${amountSats}`);
 
-        // Step 1: Check Spark BTC balance
+        // Step 1: Check Spark BTC balance & auto-adjust for fees
         const sparkBalance = await sparkAdapter.getBalance(userId, mnemonic);
-        console.log(`[Tool:swap_btc_to_usdt] sparkBalance=${sparkBalance}`);
-        if (Number(sparkBalance) < amountSats) {
+        const available = Number(sparkBalance);
+        console.log(`[Tool:swap_btc_to_usdt] sparkBalance=${available}`);
+
+        if (available < 100) {
           return JSON.stringify({
             success: false,
-            error: `Insufficient Spark balance: ${Number(sparkBalance).toLocaleString()} sats available, need ${amountSats.toLocaleString()} sats`,
+            error: `Balance too low to swap: ${available.toLocaleString()} sats.`,
           });
         }
 
-        // Step 2: Create a Lightning invoice on the Liquid side to receive L-BTC
+        // Auto-adjust: if requested amount is close to or exceeds balance,
+        // shrink to leave room for Lightning routing fees
+        const invoiceAmount = computeInvoiceAmount(amountSats, available);
+        if (invoiceAmount < 100) {
+          return JSON.stringify({
+            success: false,
+            error: `After reserving for routing fees, only ${invoiceAmount} sats left — too low to swap.`,
+          });
+        }
+        if (invoiceAmount < amountSats) {
+          console.log(`[Tool:swap_btc_to_usdt] auto-adjusted ${amountSats} → ${invoiceAmount} to reserve for routing fees`);
+        }
+
+        // Step 2: Create a Lightning invoice on the Liquid side for the adjusted amount
         let invoice: string;
         let receiveFee: number;
         try {
-          const rcv = await liquidAdapter.createLightningInvoice(userId, mnemonic, amountSats);
+          const rcv = await liquidAdapter.createLightningInvoice(userId, mnemonic, invoiceAmount);
           invoice = rcv.invoice;
           receiveFee = rcv.feesSat;
-          console.log(`[Tool:swap_btc_to_usdt] Lightning invoice created, receiveFee=${receiveFee}`);
+          console.log(`[Tool:swap_btc_to_usdt] Lightning invoice created for ${invoiceAmount} sats, receiveFee=${receiveFee}`);
         } catch (err: any) {
           return JSON.stringify({
             success: false,
@@ -507,10 +554,30 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
           const payResult = await sparkAdapter.payInvoice(userId, mnemonic, invoice, 1000);
           console.log(`[Tool:swap_btc_to_usdt] Spark payment sent, status=${payResult?.status}`);
         } catch (err: any) {
-          return JSON.stringify({
-            success: false,
-            error: `Failed to pay Lightning invoice from Spark: ${err.message}`,
-          });
+          // If still not enough, try once more with a bigger buffer
+          if (err.message?.includes('insufficient') || err.message?.includes('fee') || err.message?.includes('balance')) {
+            const smallerAmount = Math.floor(invoiceAmount * 0.95);
+            console.log(`[Tool:swap_btc_to_usdt] retrying with smaller amount: ${smallerAmount}`);
+            if (smallerAmount < 100) {
+              return JSON.stringify({ success: false, error: `Balance too small after fee adjustment: ${err.message}` });
+            }
+            try {
+              const rcv2 = await liquidAdapter.createLightningInvoice(userId, mnemonic, smallerAmount);
+              await sparkAdapter.payInvoice(userId, mnemonic, rcv2.invoice, 1000);
+              receiveFee = rcv2.feesSat;
+              console.log(`[Tool:swap_btc_to_usdt] retry succeeded with ${smallerAmount} sats`);
+            } catch (retryErr: any) {
+              return JSON.stringify({
+                success: false,
+                error: `Failed to pay Lightning invoice from Spark after retry: ${retryErr.message}`,
+              });
+            }
+          } else {
+            return JSON.stringify({
+              success: false,
+              error: `Failed to pay Lightning invoice from Spark: ${err.message}`,
+            });
+          }
         }
 
         // Step 4: Wait for L-BTC to arrive in Liquid wallet
@@ -541,7 +608,7 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
         const btcAmount = lbtcBalance / 1e8;
         // Use 95% of estimated USDT to account for swap slippage and fees
         const estimatedUsdt = btcAmount * btcPrice * 0.95;
-        const usdtAmount = Math.floor(estimatedUsdt * 100) / 100; // round down to 2 decimals
+        const usdtAmount = Math.floor(estimatedUsdt * 100) / 100;
         console.log(`[Tool:swap_btc_to_usdt] btcPrice=${btcPrice}, estimatedUsdt=${estimatedUsdt}, usdtAmount=${usdtAmount}`);
 
         if (usdtAmount < 0.01) {
@@ -558,11 +625,11 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
 
           return JSON.stringify({
             success: true,
-            amountSatsSent: amountSats,
+            amountSatsSent: invoiceAmount,
             usdtReceived: usdtAmount,
             lightningFee: receiveFee,
             swapFee: swapResult.feesSat,
-            message: `Converted ${amountSats.toLocaleString()} sats → ~${usdtAmount.toFixed(2)} USDT`,
+            message: `Converted ${invoiceAmount.toLocaleString()} sats → ~${usdtAmount.toFixed(2)} USDT`,
           });
         } catch (err: any) {
           console.error(`[Tool:swap_btc_to_usdt] swap error:`, err);
@@ -579,7 +646,8 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
     {
       name: 'swap_btc_to_usdt',
       description:
-        'EXECUTE a BTC → USDT conversion. Moves BTC from Spark → Liquid via Lightning, then swaps L-BTC → USDT. ' +
+        'EXECUTE a BTC → USDT conversion. Automatically reserves sats for Lightning routing fees. ' +
+        'If the amount is close to full balance, it auto-adjusts down to ensure the payment succeeds. ' +
         'Takes 10-60 seconds. ' +
         'MUST call swap_estimate_btc_to_usdt first and show fees to user. ' +
         'MUST call policy_check with actionType "swap". ' +
