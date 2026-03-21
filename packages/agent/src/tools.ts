@@ -620,6 +620,68 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
     }
   );
 
+  // ── Price / conversion tools ──────────────────────
+
+  const btcPrice = tool(
+    async () => {
+      try {
+        const price = await getBtcPrice();
+        if (price === 0) {
+          return 'Error: unable to fetch BTC price right now.';
+        }
+        console.log(`[Tool:get_btc_price] price=$${price}`);
+        return JSON.stringify({
+          btcPriceUsd: price,
+          source: 'CoinGecko',
+          note: 'Cached up to 60 s',
+        });
+      } catch (err: any) {
+        console.error(`[Tool:get_btc_price] ERROR:`, err);
+        return `Error fetching BTC price: ${err.message}`;
+      }
+    },
+    {
+      name: 'get_btc_price',
+      description:
+        'Get the current real-time BTC/USD price from CoinGecko. ' +
+        'MUST be called whenever you need to convert between USD and sats. ' +
+        'NEVER estimate or guess the BTC price from your training data.',
+      schema: z.object({}),
+    }
+  );
+
+  const usdToSats = tool(
+    async ({ usd }) => {
+      try {
+        const price = await getBtcPrice();
+        if (price === 0) {
+          return 'Error: unable to fetch BTC price right now.';
+        }
+        const btc = usd / price;
+        const sats = Math.round(btc * 1e8);
+        console.log(`[Tool:usd_to_sats] $${usd} @ $${price}/BTC = ${sats} sats`);
+        return JSON.stringify({
+          usd,
+          btcPriceUsd: price,
+          sats,
+          btc: btc.toFixed(8),
+        });
+      } catch (err: any) {
+        console.error(`[Tool:usd_to_sats] ERROR:`, err);
+        return `Error converting USD to sats: ${err.message}`;
+      }
+    },
+    {
+      name: 'usd_to_sats',
+      description:
+        'Convert a USD amount to satoshis using the real-time BTC price. ' +
+        'MUST be used when the user specifies an amount in dollars (e.g. "$5 of BTC").',
+      schema: z.object({
+        usd: z.number().positive().describe('Amount in US dollars'),
+      }),
+    }
+  );
+
   return [
     sparkGetBalance,
     sparkGetAddress,
@@ -641,5 +703,7 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
     policyUpdate,
     receiptSave,
     historyGet,
+    btcPrice,
+    usdToSats,
   ];
 }
