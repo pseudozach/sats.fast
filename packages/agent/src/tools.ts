@@ -21,7 +21,7 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
         const btc = satsToBtc(balance);
         const usd = await satsToUsd(balance);
         console.log(`[Tool:spark_get_balance] balance=${balance}, btc=${btc}, usd=${usd}`);
-        return `\u26a1 Lightning BTC (Spark)\nBalance: ${btc} BTC (${Number(balance).toLocaleString()} sats)\n\u2248 $${usd} USD`;
+        return `Bitcoin: ${Number(balance).toLocaleString()} sats (~$${usd})`;
       } catch (err: any) {
         console.error(`[Tool:spark_get_balance] ERROR:`, err);
         return `Error getting Spark balance: ${err.message}`;
@@ -526,13 +526,7 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
       try {
         const bal = await liquidAdapter.getBalance(userId, mnemonic);
         const status = await liquidAdapter.getWalletStatus(userId, mnemonic);
-        const lines = [
-          `💵 Liquid USDT: ${bal.usdtBalance.toFixed(2)} USDT`,
-          `🔶 L-BTC: ${status.confirmedSat.toLocaleString()} sats`,
-        ];
-        if (status.pendingReceiveSat > 0) lines.push(`⏳ Pending receive: ${status.pendingReceiveSat.toLocaleString()} sats`);
-        if (status.pendingSendSat > 0) lines.push(`⏳ Pending send: ${status.pendingSendSat.toLocaleString()} sats`);
-        return lines.join('\n');
+        return `USD: ${bal.usdtBalance.toFixed(2)} USDT`;
       } catch (err: any) {
         return `Error getting Liquid balance: ${err.message}`;
       }
