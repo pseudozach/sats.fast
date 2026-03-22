@@ -596,6 +596,8 @@ export class LiquidAdapter {
         console.log(`[LiquidAdapter:swapUsdtToLbtc] attempt ${attempt + 1}/${MAX_RETRIES}: ${currentSat} sats`);
 
         const lbtcAmountBtc = currentSat / 1e8;
+        console.log(`[LiquidAdapter:swapUsdtToLbtc] prepareSendPayment: dest=${selfAddress.substring(0, 20)}..., toAsset=LBTC, receiverAmount=${lbtcAmountBtc}, fromAsset=USDT`);
+
         const prepSend = await sdk.prepareSendPayment({
           destination: selfAddress,
           amount: {
@@ -605,8 +607,9 @@ export class LiquidAdapter {
             fromAsset: USDT_ASSET_ID,
           },
         });
-        console.log(`[LiquidAdapter:swapUsdtToLbtc] feesSat=${prepSend.feesSat}, estimatedAssetFees=${prepSend.estimatedAssetFees}`);
+        console.log(`[LiquidAdapter:swapUsdtToLbtc] prepareSend OK: feesSat=${prepSend.feesSat}, estimatedAssetFees=${prepSend.estimatedAssetFees}, exchangeAmountSat=${prepSend.exchangeAmountSat}`);
 
+        console.log(`[LiquidAdapter:swapUsdtToLbtc] executing sendPayment...`);
         const sendRes = await sdk.sendPayment({ prepareResponse: prepSend });
         const payment = sendRes.payment as Record<string, unknown> | undefined;
         const txId = (payment?.txId as string) ?? (payment?.id as string) ?? null;
@@ -621,6 +624,7 @@ export class LiquidAdapter {
         };
       } catch (err: any) {
         const msg = err.message || '';
+        console.error(`[LiquidAdapter:swapUsdtToLbtc] attempt ${attempt + 1} ERROR: ${msg}`, err.code || '', err.details || '');
         if (msg.includes('not enough funds') || msg.includes('insufficient') || msg.includes('InsufficientFunds')) {
           const reduced = currentSat * 0.85;
           console.log(`[LiquidAdapter:swapUsdtToLbtc] attempt ${attempt + 1} failed (not enough funds), reducing ${currentSat} → ${Math.floor(reduced)} sats`);

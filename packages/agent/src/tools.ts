@@ -1118,12 +1118,16 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
         // Step 3: Swap USDT → L-BTC via self-payment
         let swapFee = 0;
         let swapTxId: string | null = null;
+        let actualLbtcSat = lbtcAmountSat;
         try {
+          console.log(`[Tool:swap_usdt_to_btc] calling swapUsdtToLbtc(${lbtcAmountSat})...`);
           const swapResult = await liquidAdapter.swapUsdtToLbtc(userId, mnemonic, lbtcAmountSat);
           swapFee = swapResult.feesSat;
           swapTxId = swapResult.txId ?? null;
-          console.log(`[Tool:swap_usdt_to_btc] swap done, feesSat=${swapFee}, txId=${swapTxId}`);
+          actualLbtcSat = swapResult.actualLbtcSat;
+          console.log(`[Tool:swap_usdt_to_btc] swap done, feesSat=${swapFee}, txId=${swapTxId}, actualLbtcSat=${actualLbtcSat}`);
         } catch (err: any) {
+          console.error(`[Tool:swap_usdt_to_btc] swapUsdtToLbtc FAILED:`, err.message, err.code || '', err.details || '');
           return JSON.stringify({
             success: false,
             error: `USDT → L-BTC swap failed: ${err.message}`,
@@ -1133,16 +1137,17 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
         // Step 4: Create Lightning invoice on Spark to receive the BTC
         let sparkInvoice: string;
         try {
-          const invoiceResult = await sparkAdapter.createInvoice(userId, mnemonic, lbtcAmountSat, 'USDT→BTC swap');
+          console.log(`[Tool:swap_usdt_to_btc] creating Spark invoice for ${actualLbtcSat} sats...`);
+          const invoiceResult = await sparkAdapter.createInvoice(userId, mnemonic, actualLbtcSat, 'USDT→BTC swap');
           sparkInvoice = invoiceResult?.invoice?.encodedInvoice || invoiceResult?.invoice;
-          console.log(`[Tool:swap_usdt_to_btc] Spark invoice created`);
+          console.log(`[Tool:swap_usdt_to_btc] Spark invoice created: ${String(sparkInvoice).substring(0, 40)}...`);
         } catch (err: any) {
           // Save partial receipt
           try {
             await saveReceipt({
               userId: dbUserId,
               actionType: 'swap_usdt_to_btc (partial)',
-              amountSats: lbtcAmountSat,
+              amountSats: actualLbtcSat,
               feeSats: swapFee,
               txId: swapTxId ?? undefined,
               extra: { status: 'lbtc_swapped_invoice_failed', swapTxId, usdtAmount, error: err.message },
@@ -1157,6 +1162,7 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
 
         // Step 5: Pay the Spark invoice from Liquid L-BTC
         try {
+          console.log(`[Tool:swap_usdt_to_btc] paying Spark invoice from Liquid L-BTC...`);
           const payResult = await liquidAdapter.payLightningInvoice(userId, mnemonic, sparkInvoice);
           const lnPayTxId = payResult.txId ?? null;
           console.log(`[Tool:swap_usdt_to_btc] Liquid→Spark Lightning payment sent, feesSat=${payResult.feesSat}, txId=${lnPayTxId}`);
@@ -1168,7 +1174,7 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
             receiptSummary = await saveReceipt({
               userId: dbUserId,
               actionType: 'swap_usdt_to_btc',
-              amountSats: lbtcAmountSat,
+              amountSats: actualLbtcSat,
               feeSats: totalFee,
               txId: swapTxId ?? lnPayTxId ?? undefined,
               extra: {
@@ -1177,7 +1183,7 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
                 swapFee,
                 lightningFee: payResult.feesSat,
                 usdtSent: usdtAmount,
-                btcReceivedSats: lbtcAmountSat,
+                btcReceivedSats: actualLbtcSat,
                 btcPriceUsd: btcPrice,
               },
             });
@@ -1188,21 +1194,22 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
           return JSON.stringify({
             success: true,
             usdtSent: usdtAmount,
-            btcReceivedSats: lbtcAmountSat,
+            btcReceivedSats: actualLbtcSat,
             swapFee,
             lightningFee: payResult.feesSat,
             liquidSwapTxId: swapTxId,
             lightningPayTxId: lnPayTxId,
             receiptSaved: !!receiptSummary,
-            message: `Converted ${usdtAmount.toFixed(2)} USDT → ~${lbtcAmountSat.toLocaleString()} sats`,
+            message: `Converted ${usdtAmount.toFixed(2)} USDT → ~${actualLbtcSat.toLocaleString()} sats`,
           });
         } catch (err: any) {
+          console.error(`[Tool:swap_usdt_to_btc] Lightning payment FAILED:`, err.message, err.code || '', err.details || '');
           // Save partial receipt
           try {
             await saveReceipt({
               userId: dbUserId,
               actionType: 'swap_usdt_to_btc (partial)',
-              amountSats: lbtcAmountSat,
+              amountSats: actualLbtcSat,
               feeSats: swapFee,
               txId: swapTxId ?? undefined,
               extra: { status: 'lbtc_swapped_ln_failed', swapTxId, usdtAmount, error: err.message },
