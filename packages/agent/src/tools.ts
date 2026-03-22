@@ -412,16 +412,26 @@ export function createUserTools(userId: string, dbUserId: number, mnemonic: stri
         }
 
         // Get spark public key and liquid address automatically
-        const [sparkPubKey, liquidAddr] = await Promise.all([
-          sparkAdapter.getIdentityPublicKey(userId, mnemonic),
-          liquidAdapter.getAddress(userId, mnemonic).catch(() => null),
-        ]);
+        const sparkPubKey = await sparkAdapter.getIdentityPublicKey(userId, mnemonic);
+        let liquidAddr: string | null = null;
+        try {
+          const { prepareResponse } = await liquidAdapter.prepareReceive(userId, mnemonic);
+          const destination = await liquidAdapter.executeReceive(userId, mnemonic, prepareResponse);
+          // destination may be a BIP21 URI like "liquidnetwork:addr?..." — extract the plain address
+          if (destination.startsWith('liquidnetwork:')) {
+            liquidAddr = destination.replace('liquidnetwork:', '').split('?')[0];
+          } else {
+            liquidAddr = destination.split('?')[0];
+          }
+        } catch (e) {
+          console.warn(`[Tool:claim_username] could not get liquid address:`, (e as Error).message);
+        }
 
         if (!sparkPubKey) {
           return JSON.stringify({ success: false, error: 'Could not retrieve your Spark public key. Try again.' });
         }
 
-        console.log(`[Tool:claim_username] sparkPubKey=${sparkPubKey.substring(0, 16)}..., liquidAddr=${liquidAddr ? 'yes' : 'no'}`);
+        console.log(`[Tool:claim_username] sparkPubKey=${sparkPubKey.substring(0, 16)}..., liquidAddr=${liquidAddr || 'none'}`);
 
         // Call the sats.fast website registration API
         const res = await fetch('https://sats.fast/api/register', {
