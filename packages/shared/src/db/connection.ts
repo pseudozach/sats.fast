@@ -11,6 +11,73 @@ export function getDbPath(): string {
   return resolve(process.env.DATABASE_URL || './data/sats.db');
 }
 
+/** Ensure all tables exist (idempotent — uses IF NOT EXISTS) */
+function ensureTables(sqlite: InstanceType<typeof Database>) {
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_id TEXT UNIQUE NOT NULL,
+      username TEXT,
+      seed_enc TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS admin_users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS bot_config (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS provider_configs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      provider TEXT NOT NULL,
+      api_key_enc TEXT NOT NULL,
+      model TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS policy_rules (
+      user_id INTEGER PRIMARY KEY REFERENCES users(id),
+      daily_limit_sats INTEGER NOT NULL DEFAULT 1000000,
+      per_tx_limit_sats INTEGER NOT NULL DEFAULT 100000,
+      auto_approve_sats INTEGER NOT NULL DEFAULT 10000,
+      autopilot INTEGER NOT NULL DEFAULT 0,
+      allowlist_json TEXT NOT NULL DEFAULT '[]'
+    )`,
+    `CREATE TABLE IF NOT EXISTS pending_approvals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      action_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL,
+      resolved_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS receipts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      action_type TEXT NOT NULL,
+      amount_sats INTEGER,
+      fee_sats INTEGER,
+      tx_id TEXT,
+      summary TEXT NOT NULL,
+      receipt_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS audit_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      event_type TEXT NOT NULL,
+      data_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`,
+  ];
+  for (const sql of statements) {
+    sqlite.exec(sql);
+  }
+}
+
 export function getDb(): BetterSQLite3Database<typeof schema> {
   if (!_db) {
     const dbPath = getDbPath();
@@ -18,6 +85,7 @@ export function getDb(): BetterSQLite3Database<typeof schema> {
     _sqlite = new Database(dbPath);
     _sqlite.pragma('journal_mode = WAL');
     _sqlite.pragma('foreign_keys = ON');
+    ensureTables(_sqlite);
     _db = drizzle(_sqlite, { schema });
   }
   return _db;
