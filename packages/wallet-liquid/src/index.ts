@@ -503,7 +503,7 @@ export class LiquidAdapter {
     const selfAddress = rcvRes.destination;
     console.log(`[LiquidAdapter:swapLbtcToUsdt] selfAddress=${selfAddress.substring(0, 30)}...`);
 
-    // 2. Try prepare+send, reducing the amount on "not enough funds" errors
+    // 2. Try prepare+send, with retries for transient errors (deadline, not enough funds)
     let currentAmount = usdtAmount;
     const MAX_RETRIES = 5;
 
@@ -517,22 +517,27 @@ export class LiquidAdapter {
 
         console.log(`[LiquidAdapter:swapLbtcToUsdt] attempt ${attempt + 1}/${MAX_RETRIES}: ${currentAmount} USDT`);
 
-        const prepSend = await sdk.prepareSendPayment({
+        const prepareReq = {
           destination: selfAddress,
           amount: {
-            type: 'asset',
+            type: 'asset' as const,
             toAsset: USDT_ASSET_ID,
             receiverAmount: currentAmount,
             fromAsset: LBTC_ASSET_ID,
           },
           paymentTimeoutSec: 120,
-        });
-        console.log(`[LiquidAdapter:swapLbtcToUsdt] feesSat=${prepSend.feesSat}, estimatedAssetFees=${prepSend.estimatedAssetFees}, exchangeAmountSat=${prepSend.exchangeAmountSat}`);
+        };
+        console.log(`[LiquidAdapter:swapLbtcToUsdt] prepareSendPayment req:`, JSON.stringify(prepareReq, null, 2));
+
+        const prepSend = await sdk.prepareSendPayment(prepareReq);
+        console.log(`[LiquidAdapter:swapLbtcToUsdt] prepareSend response:`, JSON.stringify(prepSend, null, 2));
 
         // 3. Execute the swap
+        console.log(`[LiquidAdapter:swapLbtcToUsdt] executing sendPayment...`);
         const sendRes = await sdk.sendPayment({ prepareResponse: prepSend });
         const payment = sendRes.payment as Record<string, unknown> | undefined;
         const txId = (payment?.txId as string) ?? (payment?.id as string) ?? null;
+        console.log(`[LiquidAdapter:swapLbtcToUsdt] sendPayment response:`, JSON.stringify({ txId, payment }, null, 2));
         console.log(`[LiquidAdapter:swapLbtcToUsdt] swap complete, txId=${txId}, actualAmount=${currentAmount}`);
 
         return {
@@ -544,14 +549,20 @@ export class LiquidAdapter {
         };
       } catch (err: any) {
         const msg = err.message || '';
+        console.error(`[LiquidAdapter:swapLbtcToUsdt] attempt ${attempt + 1} ERROR: ${msg}`);
+        console.error(`[LiquidAdapter:swapLbtcToUsdt] full error:`, JSON.stringify(err, Object.getOwnPropertyNames(err), 2));
+
         if (msg.includes('not enough funds') || msg.includes('insufficient') || msg.includes('InsufficientFunds')) {
-          // Reduce by 15% and retry
           const reduced = currentAmount * 0.85;
-          console.log(`[LiquidAdapter:swapLbtcToUsdt] attempt ${attempt + 1} failed (not enough funds), reducing ${currentAmount} → ${reduced.toFixed(2)} USDT`);
+          console.log(`[LiquidAdapter:swapLbtcToUsdt] not enough funds, reducing ${currentAmount} → ${reduced.toFixed(2)} USDT`);
           currentAmount = reduced;
           continue;
         }
-        // Non-retryable error
+        if (msg.includes('deadline') || msg.includes('timeout') || msg.includes('timed out')) {
+          console.log(`[LiquidAdapter:swapLbtcToUsdt] deadline/timeout, waiting 3s before retry...`);
+          await new Promise(r => setTimeout(r, 3000));
+          continue;
+        }
         throw err;
       }
     }
@@ -583,7 +594,7 @@ export class LiquidAdapter {
     const selfAddress = rcvRes.destination;
     console.log(`[LiquidAdapter:swapUsdtToLbtc] selfAddress=${selfAddress.substring(0, 30)}...`);
 
-    // 2. Try prepare+send, reducing on "not enough funds"
+    // 2. Try prepare+send, with retries for transient errors (deadline, not enough funds)
     let currentSat = lbtcAmountSat;
     const MAX_RETRIES = 5;
 
@@ -597,24 +608,27 @@ export class LiquidAdapter {
         console.log(`[LiquidAdapter:swapUsdtToLbtc] attempt ${attempt + 1}/${MAX_RETRIES}: ${currentSat} sats`);
 
         const lbtcAmountBtc = currentSat / 1e8;
-        console.log(`[LiquidAdapter:swapUsdtToLbtc] prepareSendPayment: dest=${selfAddress.substring(0, 20)}..., toAsset=LBTC, receiverAmount=${lbtcAmountBtc}, fromAsset=USDT`);
 
-        const prepSend = await sdk.prepareSendPayment({
+        const prepareReq = {
           destination: selfAddress,
           amount: {
-            type: 'asset',
+            type: 'asset' as const,
             toAsset: LBTC_ASSET_ID,
             receiverAmount: lbtcAmountBtc,
             fromAsset: USDT_ASSET_ID,
           },
           paymentTimeoutSec: 120,
-        });
-        console.log(`[LiquidAdapter:swapUsdtToLbtc] prepareSend OK: feesSat=${prepSend.feesSat}, estimatedAssetFees=${prepSend.estimatedAssetFees}, exchangeAmountSat=${prepSend.exchangeAmountSat}`);
+        };
+        console.log(`[LiquidAdapter:swapUsdtToLbtc] prepareSendPayment req:`, JSON.stringify(prepareReq, null, 2));
+
+        const prepSend = await sdk.prepareSendPayment(prepareReq);
+        console.log(`[LiquidAdapter:swapUsdtToLbtc] prepareSend response:`, JSON.stringify(prepSend, null, 2));
 
         console.log(`[LiquidAdapter:swapUsdtToLbtc] executing sendPayment...`);
         const sendRes = await sdk.sendPayment({ prepareResponse: prepSend });
         const payment = sendRes.payment as Record<string, unknown> | undefined;
         const txId = (payment?.txId as string) ?? (payment?.id as string) ?? null;
+        console.log(`[LiquidAdapter:swapUsdtToLbtc] sendPayment response:`, JSON.stringify({ txId, payment }, null, 2));
         console.log(`[LiquidAdapter:swapUsdtToLbtc] swap complete, txId=${txId}, actualSat=${currentSat}`);
 
         return {
@@ -626,11 +640,19 @@ export class LiquidAdapter {
         };
       } catch (err: any) {
         const msg = err.message || '';
-        console.error(`[LiquidAdapter:swapUsdtToLbtc] attempt ${attempt + 1} ERROR: ${msg}`, err.code || '', err.details || '');
+        console.error(`[LiquidAdapter:swapUsdtToLbtc] attempt ${attempt + 1} ERROR: ${msg}`);
+        console.error(`[LiquidAdapter:swapUsdtToLbtc] full error:`, JSON.stringify(err, Object.getOwnPropertyNames(err), 2));
+
+        // Retryable errors: not enough funds → reduce amount; deadline/timeout → retry same amount after delay
         if (msg.includes('not enough funds') || msg.includes('insufficient') || msg.includes('InsufficientFunds')) {
           const reduced = currentSat * 0.85;
-          console.log(`[LiquidAdapter:swapUsdtToLbtc] attempt ${attempt + 1} failed (not enough funds), reducing ${currentSat} → ${Math.floor(reduced)} sats`);
+          console.log(`[LiquidAdapter:swapUsdtToLbtc] not enough funds, reducing ${currentSat} → ${Math.floor(reduced)} sats`);
           currentSat = reduced;
+          continue;
+        }
+        if (msg.includes('deadline') || msg.includes('timeout') || msg.includes('timed out')) {
+          console.log(`[LiquidAdapter:swapUsdtToLbtc] deadline/timeout, waiting 3s before retry...`);
+          await new Promise(r => setTimeout(r, 3000));
           continue;
         }
         throw err;
