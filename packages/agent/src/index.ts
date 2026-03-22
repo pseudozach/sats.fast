@@ -117,9 +117,19 @@ export async function runAgent(
     const history = getHistory(userContext.userId);
     const allMessages = [...history, new HumanMessage(userMessage)];
 
-    const result = await agent.invoke({
-      messages: allMessages,
-    });
+    // Timeout: abort the agent if it takes more than 120 seconds
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 120_000);
+
+    let result;
+    try {
+      result = await agent.invoke(
+        { messages: allMessages },
+        { recursionLimit: 30, signal: controller.signal },
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
 
     // Extract the last AI message
     const messages = result.messages;
@@ -137,8 +147,11 @@ export async function runAgent(
 
     return aiResponse;
   } catch (err: any) {
-    console.error('Agent error:', err);
+    console.error('Agent error:', err?.message || err);
 
+    if (err.name === 'AbortError' || err.message?.includes('aborted')) {
+      return '⏳ That took too long. The operation may still be processing in the background. Please check /balance in a minute.';
+    }
     if (err.message?.includes('API key')) {
       return '❌ AI API key error. Please check your API key with /setkey.';
     }
@@ -146,6 +159,6 @@ export async function runAgent(
       return '⏳ Rate limited by AI provider. Please wait a moment and try again.';
     }
 
-    return `❌ Agent error: ${err.message || 'Unknown error'}. Please try again.`;
+    return `❌ Something went wrong. Please try again.`;
   }
 }

@@ -565,20 +565,23 @@ export function registerHandlers(bot: Bot) {
     await safeSend(ctx, response);
 
     // Start background monitoring if the user has pending Liquid payments
-    // (e.g., swap in progress, L-BTC arriving, etc.)
+    // Fire-and-forget — NEVER block the message handler
     if (liquidAdapter.hasSdk(tgId) && ctx.chat) {
-      try {
-        const bal = await liquidAdapter.getBalance(tgId, mnemonic);
-        if (
-          bal.lBtcBalanceSat > 0 ||
-          bal.pendingSendSat > 0 ||
-          bal.pendingReceiveSat > 0
-        ) {
-          await watchUserSwaps(tgId, ctx.chat.id, mnemonic, id);
+      const chatId = ctx.chat.id;
+      (async () => {
+        try {
+          const bal = await liquidAdapter.getBalance(tgId, mnemonic);
+          if (
+            bal.lBtcBalanceSat > 0 ||
+            bal.pendingSendSat > 0 ||
+            bal.pendingReceiveSat > 0
+          ) {
+            await watchUserSwaps(tgId, chatId, mnemonic, id);
+          }
+        } catch (_) {
+          /* Liquid SDK not initialized or error — skip monitoring */
         }
-      } catch (_) {
-        /* Liquid SDK not initialized or error — skip monitoring */
-      }
+      })();
     }
 
     // Auto-attach QR code if the agent response contains an invoice or address
