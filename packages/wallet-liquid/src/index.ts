@@ -525,6 +525,7 @@ export class LiquidAdapter {
             receiverAmount: currentAmount,
             fromAsset: LBTC_ASSET_ID,
           },
+          paymentTimeoutSec: 120,
         });
         console.log(`[LiquidAdapter:swapLbtcToUsdt] feesSat=${prepSend.feesSat}, estimatedAssetFees=${prepSend.estimatedAssetFees}, exchangeAmountSat=${prepSend.exchangeAmountSat}`);
 
@@ -606,6 +607,7 @@ export class LiquidAdapter {
             receiverAmount: lbtcAmountBtc,
             fromAsset: USDT_ASSET_ID,
           },
+          paymentTimeoutSec: 120,
         });
         console.log(`[LiquidAdapter:swapUsdtToLbtc] prepareSend OK: feesSat=${prepSend.feesSat}, estimatedAssetFees=${prepSend.estimatedAssetFees}, exchangeAmountSat=${prepSend.exchangeAmountSat}`);
 
